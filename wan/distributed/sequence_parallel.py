@@ -338,7 +338,7 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
     k = iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
     # q=half(q)
     v = all_to_all(v, scatter_dim=2, gather_dim=1)
-    print(f"rank {get_rank()} debug:====> AFTER all to all {q.mean() = },{k.mean() = },{v.mean() = }")
+    print(f"rank {get_rank()} debug:====> triton AFTER all to all {q.mean() = },{k.mean() = },{v.mean() = }")
     # apply attention
     x = flash_attention(
         q,
