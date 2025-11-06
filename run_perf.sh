@@ -1,7 +1,7 @@
 docker rm -f zov_wan2.2_rope_alltoall_fusion_test
-docker rmi wan2.2_rocm7.0.2_pytorch_2.10.0.dev20251023_iris_0dfc460_3
+docker rmi wan2.2_rocm7.0.2_pytorch_2.10.0.dev20251023_iris_0dfc460
 
-docker build -f dockerfile_rocm_7.0.2 -t wan2.2_rocm7.0.2_pytorch_2.10.0.dev20251023_iris_0dfc460_3 .
+docker build -f dockerfile_rocm_7.0.2 -t wan2.2_rocm7.0.2_pytorch_2.10.0.dev20251023_iris_0dfc460 .
 
 docker run  -d \
         --network=host \
@@ -15,8 +15,8 @@ docker run  -d \
         --ulimit stack=67108864 \
         -v /home/jialzhu:/home/jialzhu \
         --name zov_wan2.2_rope_alltoall_fusion_test \
-        -t wan2.2_rocm7.0.2_pytorch_2.10.0.dev20251023_iris_0dfc460_3
+        -t wan2.2_rocm7.0.2_pytorch_2.10.0.dev20251023_iris_0dfc460
 
 docker restart zov_wan2.2_rope_alltoall_fusion_test
-sleep 3
+docker exec zov_wan2.2_rope_alltoall_fusion_test git -C /app/Wan2.2 pull
 docker exec zov_wan2.2_rope_alltoall_fusion_test bash /app/Wan2.2/tests/i2v.sh
