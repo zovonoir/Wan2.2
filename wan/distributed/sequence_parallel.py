@@ -28,7 +28,7 @@ def rope_triton_kernel(qk_ptr, freqs_ptr,
     # 但是freq只有128个,要broadcast到[40,128]
     # PROG_SIZE 必须等于head_size!
     program_id = tl.program_id(0)
-    tl.static_assert(PROG_SIZE > 0 and (PROG_SIZE & (PROG_SIZE - 1)) == 0,"PROG_SIZE only support power of 2!")
+    tl.static_assert(PROG_SIZE > 0 and (PROG_SIZE & (PROG_SIZE - 1)) == 0,f"PROG_SIZE only support power of 2!current is {PROG_SIZE}")
     freqs_rank_offset = PROG_SIZE * sp_rank * s_per_rank # freq当前rank在freq中的偏移量
     freq_rank_start_ptr = freqs_ptr + freqs_rank_offset # 这个rank的起始指针
     freq_program_start_ptr = freq_rank_start_ptr + program_id * PROG_SIZE
@@ -98,7 +98,7 @@ def rope_triton_kernel_fp32(qk_ptr, freqs_ptr,
     # 但是freq只有128个,要broadcast到[40,128]
     # PROG_SIZE 必须等于head_size!
     program_id = tl.program_id(0)
-    tl.static_assert(PROG_SIZE > 0 and (PROG_SIZE & (PROG_SIZE - 1)) == 0,"PROG_SIZE only support power of 2!")
+    tl.static_assert(PROG_SIZE > 0 and (PROG_SIZE & (PROG_SIZE - 1)) == 0,f"PROG_SIZE only support power of 2!current is {PROG_SIZE}")
     freqs_rank_offset = PROG_SIZE * sp_rank * s_per_rank # freq当前rank在freq中的偏移量
     freq_rank_start_ptr = freqs_ptr + freqs_rank_offset # 这个rank的起始指针
     freq_program_start_ptr = freq_rank_start_ptr + program_id * PROG_SIZE
@@ -329,20 +329,21 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
     world_size = get_world_size()
     heap_bases = shmem_handle.get_heap_bases()
     # q_alltoall_buffer = torch.zeros([bs,sp_seq_len * world_size,hn//world_size,hs],dtype = x.dtype,device=x.device)
-    print(f"debug:====> {q.shape = },{q.dtype = },{k.shape = },{k.dtype = },{v.shape = },{v.dtype = },{freqs_i.shape = },{freqs_i.dtype = },{rank = },{iris_buffer_tensor.shape = },{iris_buffer_tensor.dtype = }")
+    print(f"rank {rank} debug:====> {q.shape = },{q.dtype = },{k.shape = },{k.dtype = },{v.shape = },{v.dtype = },{freqs_i.shape = },{freqs_i.dtype = },{rank = },{iris_buffer_tensor.shape = },{iris_buffer_tensor.dtype = } \n")
     rope_triton_kernel[(sp_seq_len,1,1)](q,freqs_i,hs,rank,sp_seq_len,hn, iris_buffer_tensor,world_size,heap_bases)
     q = iris_buffer_tensor.clone()
-
+    print(f"rank {rank} debug:=====> after all to all fusion {q.shape = },{q.dtype = } \n")
     # k_alltoall_buffer = torch.zeros([bs,sp_seq_len * world_size,hn//world_size,hs],dtype = x.dtype,device=x.device)
     rope_triton_kernel[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_buffer_tensor,world_size,heap_bases)
     k = iris_buffer_tensor.clone()
     # q=half(q)
+    v = all_to_all(v, scatter_dim=2, gather_dim=1)
 
     # apply attention
     x = flash_attention(
-        half(q),
+        q,
         k,
-        v,
+        half(v),
         k_lens=seq_lens,
         window_size=self.window_size,
     )
