@@ -244,6 +244,7 @@ class WanAttentionBlock(nn.Module):
             self.norm1(x).float() * (1 + e[1].squeeze(2)) + e[0].squeeze(2),
             seq_lens, grid_sizes, freqs)
         with torch.amp.autocast('cuda', dtype=torch.float32):
+            print(f"debug:====> quit self attn,{y.shape = },{x.shape = },{e.shape = }")
             x = x + y * e[2].squeeze(2)
 
         # cross-attention & ffn function

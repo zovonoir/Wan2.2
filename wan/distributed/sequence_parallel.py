@@ -350,6 +350,7 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
 
     # scatter q/k/v sequence
     x = all_to_all(x, scatter_dim=1, gather_dim=2)
+    print(f"debug:======> after flash attention and alltoall {x.shape = }")
     return x
 
 
