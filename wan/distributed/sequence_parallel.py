@@ -217,7 +217,7 @@ def sp_dit_forward(
     return [u.float() for u in x]
 
 
-def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16):
+def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16):
     assert isinstance(freqs_i,tuple)
     freqs_i,shmem_handle,iris_buffer_tensor = freqs_i
 
@@ -258,7 +258,7 @@ def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat1
     sp_seq_len = x.shape[1]
     hn = x.shape[2]
     world_size = get_world_size()
-    heap_bases = self.iris_heap_bases()
+    heap_bases = shmem_handle.get_heap_bases()
     # q_alltoall_buffer = torch.zeros([bs,sp_seq_len * world_size,hn//world_size,hs],dtype = x.dtype,device=x.device)
     print(f"debug:====> {q.shape = },{q.dtype = },{k.shape = },{k.dtype = },{v.shape = },{v.dtype = },{freqs_i.shape = },{freqs_i.dtype = },{rank = },{iris_buffer_tensor.shape = },{iris_buffer_tensor.dtype = }")
     rope_triton_kernel[(sp_seq_len,1,1)](q,freqs_i,hs,rank,sp_seq_len,hn, iris_buffer_tensor,world_size,heap_bases)
@@ -288,7 +288,7 @@ def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat1
     # x = self.o(x)
     # return x
 
-def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
+def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
     b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
     half_dtypes = (torch.float16, torch.bfloat16)
 
