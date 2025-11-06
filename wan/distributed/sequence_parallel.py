@@ -351,13 +351,13 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
     # scatter q/k/v sequence
     x = all_to_all(x, scatter_dim=1, gather_dim=2)
     print(f"debug:======> after flash attention and alltoall {x.shape = }")
-    return x
+    # return x
 
 
     # # output
-    # x = x.flatten(2)
-    # x = self.o(x)
-    # return x
+    x = x.flatten(2)
+    x = self.o(x)
+    return x
 
 def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
     b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
@@ -376,7 +376,7 @@ def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16)
     q, k, v = qkv_fn(x)
     q = rope_apply(q, grid_sizes, freqs)
     k = rope_apply(k, grid_sizes, freqs)
-
+    
     x = distributed_attention(
         half(q),
         half(k),
