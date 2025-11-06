@@ -12,6 +12,7 @@ def distributed_attention(
         v,
         seq_lens,
         window_size=(-1, -1),
+        rank = 0
 ):
     
     """
@@ -30,11 +31,11 @@ def distributed_attention(
     b = q.shape[0]
 
     # gather q/k/v sequence
-    print(f"debug:======> enter distributed flash attention {q.shape = },{q.dtype = } \n")
+    print(f"rank {rank} debug:======> original before all to all {q.mean() = },{k.mean() = },{v.mean() = } \n")
     q = all_to_all(q, scatter_dim=2, gather_dim=1)
     k = all_to_all(k, scatter_dim=2, gather_dim=1)
     v = all_to_all(v, scatter_dim=2, gather_dim=1)
-    print(f"debug:======> quit all to all  {q.shape = },{q.dtype = } \n")
+    print(f"rank {rank} debug:======> original AFTER all to all {q.mean() = },{k.mean() = },{v.mean() = } \n")
 
     # apply attention
     x = flash_attention(
