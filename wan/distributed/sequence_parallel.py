@@ -287,7 +287,7 @@ def sp_dit_forward(
     return [u.float() for u in x]
 
 
-def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16):
+def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16):
     assert isinstance(freqs_i,tuple)
     freqs_i,shmem_handle,iris_buffer_tensor = freqs_i
 
@@ -366,7 +366,7 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
     x = self.o(x)
     return x
 
-def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
+def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
     b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
     half_dtypes = (torch.float16, torch.bfloat16)
 
@@ -381,13 +381,28 @@ def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16)
         return q, k, v
 
     q, k, v = qkv_fn(x)
+
+    # 保存qkv
+    rank = get_rank()
+    torch.save(q,f"rank_{rank}_before_rope_q.pt")
+    torch.save(k,f"rank_{rank}_before_rope_k.pt")
+    torch.save(v,f"rank_{rank}_before_rope_v.pt")
+    torch.save(grid_sizes,f"rank_{rank}_grid_sizes.pt")
+    torch.save(freqs,f"rank_{rank}_freqs.pt")
+
     q = rope_apply(q, grid_sizes, freqs)
     k = rope_apply(k, grid_sizes, freqs)
-    
+    q=half(q)
+    k=half(k)
+    v=half(v)
+    # 此处将qkv tensor保存下来,然后assert
+    torch.save(q,f"rank_{rank}_rope_half_output_q.pt")
+    torch.save(k,f"rank_{rank}_rope_half_output_k.pt")
+    torch.save(v,f"rank_{rank}_rope_half_output_v.pt")
+    assert 0,"saving complete!"
+
     x = distributed_attention(
-        half(q),
-        half(k),
-        half(v),
+        q,k,v,
         seq_lens,
         window_size=self.window_size,
         rank = get_rank()
