@@ -37,7 +37,7 @@ RUN pip3 install --no-cache-dir "opencv-python>=4.9.0.80" \
 
 RUN ln -s python3 /usr/bin/python
 RUN git clone https://github.com/ROCm/iris.git && cd iris && git checkout 0dfc460e37517c05ab88f1b348d491ae30abb673 && pip install -e .
-RUN git clone https://github.com/zovonoir/Wan2.2.git
+RUN git clone https://github.com/zovonoir/Wan2.2.git && cd Wan2.2 && git checkout iris_rope_alltoall
 
 COPY ./*whl /app/*whl
 RUN pip3 install /app/*.whl
