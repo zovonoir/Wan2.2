@@ -321,11 +321,11 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
         k = all_to_all(k, scatter_dim=2, gather_dim=1)
         v = all_to_all(v, scatter_dim=2, gather_dim=1)
 
-    bs = x.shape[0]
-    hs = x.shape[-1]
+    bs = q.shape[0]
+    hs = q.shape[-1]
     rank = get_rank()
-    sp_seq_len = x.shape[1]
-    hn = x.shape[2]
+    sp_seq_len = q.shape[1]
+    hn = q.shape[2]
     world_size = get_world_size()
     heap_bases = shmem_handle.get_heap_bases()
     # q_alltoall_buffer = torch.zeros([bs,sp_seq_len * world_size,hn//world_size,hs],dtype = x.dtype,device=x.device)
