@@ -13,6 +13,7 @@ import random
 import torch
 import torch.distributed as dist
 from PIL import Image
+import iris
 
 import wan
 from wan.configs import MAX_AREA_CONFIGS, SIZE_CONFIGS, SUPPORTED_SIZES, WAN_CONFIGS
@@ -330,6 +331,10 @@ def generate(args):
             init_method="env://",
             rank=rank,
             world_size=world_size)
+
+        shmem = iris.iris(1024*1024*1024*4) # 4G
+        all_to_all_buffer = shmem.zeros([1*13640*40*128],dtype=torch.bfloat16,device="cuda") # 这里的参数量后面再补充为可配置的
+
     else:
         assert not (
             args.t5_fsdp or args.dit_fsdp
@@ -537,7 +542,9 @@ def generate(args):
             sampling_steps=args.sample_steps,
             guide_scale=args.sample_guide_scale,
             seed=args.base_seed,
-            offload_model=args.offload_model)
+            offload_model=args.offload_model,
+            iris_shm_handle = shmem, # 单卡情况下无法运行,后面需要加上条件判断
+            iris_buffer_tensor = all_to_all_buffer)
 
     if rank == 0:
         if args.save_file is None:

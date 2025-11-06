@@ -125,6 +125,31 @@ class WanI2V:
 
         self.sample_neg_prompt = config.sample_neg_prompt
 
+    def calculate_grid_sizes(self, noise,y):
+        noise_shape = noise.shape
+        y_shape = y.shape
+        device = noise.device
+        latent_shape = (1,noise_shape[0]+y_shape[0], noise_shape[1], noise_shape[2], noise_shape[3])
+        conv_out_channels = self.low_noise_model.patch_embedding.out_channels
+        conv_stride = self.low_noise_model.patch_embedding.stride
+        conv_out_shape = (1,conv_out_channels,latent_shape[2] // conv_stride[0] ,latent_shape[3] //conv_stride[1],latent_shape[4] // conv_stride[2])
+        grid_sizes = torch.stack([torch.tensor(conv_out_shape[2:], dtype=torch.long,device=device)])
+        return grid_sizes
+
+    def calculate_freqs_i(self,grid_sizes):
+        f,h,w = grid_sizes.tolist()[0]
+        seq_len = f * h * w
+        c=64 # 将这里改成可配置的不要写死
+        freqs = self.low_noise_model.freqs.clone().split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+        freqs_i = torch.cat([
+            freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
+            freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
+            freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
+        ],dim=-1).reshape(seq_len, 1, -1)
+        real_freqs_i = torch.view_as_real(freqs_i).to(self.device)
+        return real_freqs_i
+
+
     def _configure_model(self, model, use_sp, dit_fsdp, shard_fn,
                          convert_model_dtype):
         """
@@ -214,7 +239,9 @@ class WanI2V:
                  guide_scale=5.0,
                  n_prompt="",
                  seed=-1,
-                 offload_model=True):
+                 offload_model=True,
+                 iris_shm_handle = None,
+                 iris_buffer_tensor = None):
         r"""
         Generates video frames from input image and text prompt using diffusion process.
 
@@ -253,6 +280,7 @@ class WanI2V:
                 - H: Frame height (from max_area)
                 - W: Frame width from max_area)
         """
+        assert ((iris_shm_handle is not None) and (iris_buffer_tensor is not None)) or ((iris_shm_handle is None) and (iris_buffer_tensor is None))
         # preprocess
         guide_scale = (guide_scale, guide_scale) if isinstance(
             guide_scale, float) else guide_scale
@@ -363,7 +391,16 @@ class WanI2V:
 
             # sample videos
             latent = noise
+            grid_sizes=self.calculate_grid_sizes(latent,y) # grid_sizes唯一作用就是辅助计算出real_freq_i,在这之后可以弃用
+            real_freq_i=self.calculate_freqs_i(grid_sizes)
 
+            self.high_noise_model.module.freqs_i= real_freq_i
+            self.high_noise_model.module.shmem_handle = iris_shm_handle
+            self.high_noise_model.module.iris_buffer_tensor = iris_buffer_tensor
+            self.low_noise_model.module.freqs_i= real_freq_i
+            self.low_noise_model.module.shmem_handle = iris_shm_handle
+            self.low_noise_model.module.iris_buffer_tensor = iris_buffer_tensor
+            
             arg_c = {
                 'context': [context[0]],
                 'seq_len': max_seq_len,

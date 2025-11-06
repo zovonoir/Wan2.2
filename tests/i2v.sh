@@ -11,4 +11,4 @@ PROMPT="The camera opens with a medium shot of a young Korean woman with long da
 SAVEFILE_DIR=./generate_video
 
 SAVEFILE_NAME=i2v-korean-woman-8gpu-seed493227.mp4
-torchrun --nproc_per_node=8 $PY_FILE --task i2v-14B --size 1280*720 --frame_num 121 --ckpt_dir $CKPT_DIR --prompt "$PROMPT" --image examples/korean_woman.jpeg --ulysses_size 8 --base_seed 493227 --save_file $SAVEFILE_DIR/$SAVEFILE_NAME
+torchrun --nproc_per_node=8 $PY_FILE --task i2v-14B --size 1280*720 --frame_num 121 --ckpt_dir $CKPT_DIR --prompt "$PROMPT" --image examples/i2v_input.JPG --ulysses_size 8 --base_seed 493227 --save_file $SAVEFILE_DIR/$SAVEFILE_NAME

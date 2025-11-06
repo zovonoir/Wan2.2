@@ -5,6 +5,79 @@ import torch.cuda.amp as amp
 from ..modules.model import sinusoidal_embedding_1d
 from .ulysses import distributed_attention
 from .util import gather_forward, get_rank, get_world_size
+import triton
+import triton.language as tl
+import iris
+from ..modules.attention import flash_attention
+from .util import all_to_all
+
+@triton.jit
+def rope_triton_kernel(qk_ptr, freqs_ptr, 
+                    # output_ptr,
+                    PROG_SIZE:tl.constexpr,# = head_size
+                    sp_rank:tl.constexpr, # [0-7]
+                    s_per_rank:tl.constexpr, # 13640
+                    head_num:tl.constexpr, # 40
+                    # alltoall
+                    iris_buffer,
+                    world_size:tl.constexpr,
+                    heap_bases:tl.tensor
+                    ):
+    tl.static_assert(0)
+    # 每个program负责一个token,共40*128=5120个float32相乘
+    # 但是freq只有128个,要broadcast到[40,128]
+    # PROG_SIZE 必须等于head_size!
+    program_id = tl.program_id(0)
+    tl.static_assert(PROG_SIZE > 0 and (PROG_SIZE & (PROG_SIZE - 1)) == 0,"PROG_SIZE only support power of 2!")
+    freqs_rank_offset = PROG_SIZE * sp_rank * s_per_rank # freq当前rank在freq中的偏移量
+    freq_rank_start_ptr = freqs_ptr + freqs_rank_offset # 这个rank的起始指针
+    freq_program_start_ptr = freq_rank_start_ptr + program_id * PROG_SIZE
+    # program_start = program_id * PROG_SIZE
+    # rank_process_size = PROG_SIZE * s_per_rank * head_num # 这个rank一共要处理这么多的数据
+    even_offset = 2 * (tl.arange(0,PROG_SIZE) // 2) # program_start + [0,0,2,2,4,4,...126,126]
+    odd_offset = even_offset + 1 # program_start + [1,1,3,3,5,5,...,127,127]
+    freqs_offset = tl.arange(0,PROG_SIZE) #  [0,1,2,3,4,5...],freq只能load128个数据,并且复用
+    freqs_offset_swap = tl.arange(0,PROG_SIZE) ^ 0x0001 # [1,0,3,2,5,4...]
+    coe = 2*(tl.arange(0,PROG_SIZE) % 2) - 1 # [-1,1,-1,1,-1,1...]
+    even_mask = even_offset < PROG_SIZE # all true
+    odd_mask = odd_offset < PROG_SIZE
+    freqs_mask = freqs_offset < PROG_SIZE
+    freqs_mask_swap = freqs_offset_swap < PROG_SIZE
+    vy1_fp64 = tl.cast(tl.load(freq_program_start_ptr + freqs_offset,mask=freqs_mask,other=0.0),tl.float64)
+    vy2_fp64 = tl.cast(tl.load(freq_program_start_ptr + freqs_offset_swap,mask=freqs_mask_swap,other=0.0),tl.float64)
+    vx1_ptr_block_even = qk_ptr + program_id * PROG_SIZE * head_num + even_offset # 当前BLOCK处理数据的第0个head的起始地址 + 每个数据偏移量
+    vx1_ptr_block_odd = qk_ptr + program_id * PROG_SIZE * head_num + odd_offset
+    # output_ptr_block = output_ptr + program_id * PROG_SIZE * head_num + tl.arange(0,PROG_SIZE)
+    output_mask = tl.arange(0,PROG_SIZE) < PROG_SIZE
+    # alltoall 4D输出形状
+    input_head_num = head_num
+    output_head_num = input_head_num // world_size
+    input_seq_len = s_per_rank
+    output_seq_len = input_seq_len * world_size
+    # [1,input_seq_len,input_head_num,head_size] -> [1,input_seq_len * world_size,input_head_num / world_size,head_size]
+
+    for head_idx in tl.range(0,head_num,1): # 在head 维度循环,每个program计算一个token的数据量
+        # load single head for x
+        vx1_fp64 = tl.cast(tl.load(vx1_ptr_block_even + head_idx * PROG_SIZE,mask=even_mask,other=0.0),tl.float64) # mask可能不严谨
+        vx2_fp64 = tl.cast(tl.load(vx1_ptr_block_odd + head_idx * PROG_SIZE,mask=odd_mask,other=0.0),tl.float64)
+        # complex_output = tl.cast(vx1*vy1 + coe*vx2*vy2,tl.float32) # 一个head的输出
+        complex_output_bf16 = tl.cast(vx1_fp64*vy1_fp64 + coe*vx2_fp64*vy2_fp64,tl.bfloat16) # rope输出是float32格式,但是后续做alltoall之前又被转换成了bfloat16,因此这里提前转换再写入
+        # tl.store(output_ptr_block + head_idx * PROG_SIZE,complex_output,mask=output_mask)
+        # 这个head数据需要写到哪张卡哪个地址上?
+
+        target_rank = head_idx // output_head_num
+        head_idx_in_target_rank = head_idx - ((head_idx // output_head_num) * output_head_num) # 0-4 per rank
+        token_id_in_target_rank = sp_rank * input_seq_len + program_id # 0-109120
+        offset_in_target_rank = output_head_num * PROG_SIZE * token_id_in_target_rank + PROG_SIZE * head_idx_in_target_rank
+        target_pointers = iris_buffer + offset_in_target_rank + tl.arange(0,PROG_SIZE)
+        iris.store(
+                pointer = target_pointers, # iris_buffer + head_idx*PROG_SIZE +tl.arange(0,PROG_SIZE), #target_pointers,
+                value = complex_output_bf16,
+                from_rank = sp_rank,
+                to_rank = target_rank,
+                heap_bases = heap_bases,
+                mask = None
+            )
 
 
 def pad_freqs(original_tensor, target_len):
@@ -125,8 +198,8 @@ def sp_dit_forward(
     kwargs = dict(
         e=e0,
         seq_lens=seq_lens,
-        grid_sizes=grid_sizes,
-        freqs=self.freqs,
+        grid_sizes=grid_sizes, # not useful
+        freqs=self.freqs is not hasattr(self,"freqs_i") else (self.freqs_i,self.shmem_handle,self.iris_buffer_tensor),
         context=context,
         context_lens=context_lens)
 
@@ -144,7 +217,78 @@ def sp_dit_forward(
     return [u.float() for u in x]
 
 
-def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
+def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16):
+    assert isinstance(freqs_i,tuple)
+    freqs_i,shmem_handle,iris_buffer_tensor = freqs_i
+
+    b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
+    half_dtypes = (torch.float16, torch.bfloat16)
+
+    def half(x):
+        return x if x.dtype in half_dtypes else x.to(dtype)
+
+    # query, key, value function
+    def qkv_fn(x):
+        q = self.norm_q(self.q(x)).view(b, s, n, d)
+        k = self.norm_k(self.k(x)).view(b, s, n, d)
+        v = self.v(x).view(b, s, n, d)
+        return q, k, v
+
+    q, k, v = qkv_fn(x)
+    
+    if False:
+        q = rope_apply(q, grid_sizes, freqs)
+        k = rope_apply(k, grid_sizes, freqs)
+
+        x = distributed_attention(
+            half(q),
+            half(k),
+            half(v),
+            seq_lens,
+            window_size=self.window_size,
+        )
+
+        q = all_to_all(q, scatter_dim=2, gather_dim=1)
+        k = all_to_all(k, scatter_dim=2, gather_dim=1)
+        v = all_to_all(v, scatter_dim=2, gather_dim=1)
+
+    bs = x.shape[0]
+    hs = x.shape[-1]
+    rank = get_rank()
+    sp_seq_len = x.shape[1]
+    hn = x.shape[2]
+    world_size = get_world_size()
+    heap_bases = self.iris_heap_bases()
+    # q_alltoall_buffer = torch.zeros([bs,sp_seq_len * world_size,hn//world_size,hs],dtype = x.dtype,device=x.device)
+    print(f"debug:====> {q.shape = },{q.dtype = },{k.shape = },{k.dtype = },{v.shape = },{v.dtype = },{freqs_i.shape = },{freqs_i.dtype = },{rank = },{iris_buffer_tensor.shape = },{iris_buffer_tensor.dtype = }")
+    rope_triton_kernel[(sp_seq_len,1,1)](q,freqs_i,hs,rank,sp_seq_len,hn, iris_buffer_tensor,world_size,heap_bases)
+    q = iris_buffer_tensor.clone()
+
+    # k_alltoall_buffer = torch.zeros([bs,sp_seq_len * world_size,hn//world_size,hs],dtype = x.dtype,device=x.device)
+    rope_triton_kernel[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_buffer_tensor,world_size,heap_bases)
+    k = iris_buffer_tensor.clone()
+    # q=half(q)
+
+    # apply attention
+    x = flash_attention(
+        half(q),
+        k,
+        v,
+        k_lens=seq_lens,
+        window_size=self.window_size,
+    )
+
+    # scatter q/k/v sequence
+    x = all_to_all(x, scatter_dim=1, gather_dim=2)
+    return x
+
+
+    # # output
+    # x = x.flatten(2)
+    # x = self.o(x)
+    # return x
+
+def sp_attn_forward_original(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
     b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
     half_dtypes = (torch.float16, torch.bfloat16)
 
