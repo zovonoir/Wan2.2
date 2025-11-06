@@ -199,7 +199,7 @@ def sp_dit_forward(
         e=e0,
         seq_lens=seq_lens,
         grid_sizes=grid_sizes, # not useful
-        freqs=self.freqs is not hasattr(self,"freqs_i") else (self.freqs_i,self.shmem_handle,self.iris_buffer_tensor),
+        freqs=self.freqs if not hasattr(self,"freqs_i") else (self.freqs_i,self.shmem_handle,self.iris_buffer_tensor),
         context=context,
         context_lens=context_lens)
 
