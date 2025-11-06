@@ -515,3 +515,4 @@ class WanI2V:
             dist.barrier()
 
         return videos[0] if self.rank == 0 else None
+
