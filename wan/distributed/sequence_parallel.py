@@ -331,11 +331,11 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
     # q_alltoall_buffer = torch.zeros([bs,sp_seq_len * world_size,hn//world_size,hs],dtype = x.dtype,device=x.device)
     print(f"rank {rank} debug:====> {q.shape = },{q.dtype = },{k.shape = },{k.dtype = },{v.shape = },{v.dtype = },{freqs_i.shape = },{freqs_i.dtype = },{rank = },{iris_buffer_tensor.shape = },{iris_buffer_tensor.dtype = } \n")
     rope_triton_kernel[(sp_seq_len,1,1)](q,freqs_i,hs,rank,sp_seq_len,hn, iris_buffer_tensor,world_size,heap_bases)
-    q = iris_buffer_tensor.clone()
+    q = iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
     print(f"rank {rank} debug:=====> after all to all fusion {q.shape = },{q.dtype = } \n")
     # k_alltoall_buffer = torch.zeros([bs,sp_seq_len * world_size,hn//world_size,hs],dtype = x.dtype,device=x.device)
     rope_triton_kernel[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_buffer_tensor,world_size,heap_bases)
-    k = iris_buffer_tensor.clone()
+    k = iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
     # q=half(q)
     v = all_to_all(v, scatter_dim=2, gather_dim=1)
 
