@@ -340,9 +340,9 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
     k_buffer = torch.zeros_like(k)
 
     rope_triton_kernel[(sp_seq_len,1,1)](q,freqs_i,q_buffer,hs,rank,sp_seq_len,hn)
-    rope_triton_kernel[(sp_seq_len,1,1)](k,freqs_i,q_buffer,hs,rank,sp_seq_len,hn)
-    q=half(q)
-    k=half(k)
+    rope_triton_kernel[(sp_seq_len,1,1)](k,freqs_i,k_buffer,hs,rank,sp_seq_len,hn)
+    q=half(q_buffer)
+    k=half(k_buffer)
     v=half(v)
     # print(f"rank {rank} debug:=====> after all to all fusion {q.shape = },{q.dtype = } \n")
     # k_alltoall_buffer = torch.zeros([bs,sp_seq_len * world_size,hn//world_size,hs],dtype = x.dtype,device=x.device)
