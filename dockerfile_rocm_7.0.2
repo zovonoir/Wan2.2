@@ -32,7 +32,8 @@ RUN pip3 install --no-cache-dir "opencv-python>=4.9.0.80" \
                                 "imageio-ffmpeg" \
                                 "numpy>=1.23.5,<2" \
                                 decord \
-                                librosa 
+                                librosa \
+                                ninja
 
 RUN ln -s python3 /usr/bin/python
 RUN git clone https://github.com/ROCm/iris.git && cd iris && git checkout 0dfc460e37517c05ab88f1b348d491ae30abb673 && pip install -e .

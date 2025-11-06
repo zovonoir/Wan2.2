@@ -19,3 +19,4 @@ docker run  -d \
 
 docker restart zov_wan2.2_rope_alltoall_fusion_test
 sleep 3
+docker exec zov_wan2.2_rope_alltoall_fusion_test bash /app/Wan2.2/tests/i2v.sh
