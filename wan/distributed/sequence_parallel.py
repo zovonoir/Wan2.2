@@ -61,7 +61,7 @@ def rope_triton_kernel(qk_ptr, freqs_ptr,
         vx1_fp64 = tl.cast(tl.load(vx1_ptr_block_even + head_idx * PROG_SIZE,mask=even_mask,other=0.0),tl.float64) # mask可能不严谨
         vx2_fp64 = tl.cast(tl.load(vx1_ptr_block_odd + head_idx * PROG_SIZE,mask=odd_mask,other=0.0),tl.float64)
         # complex_output = tl.cast(vx1*vy1 + coe*vx2*vy2,tl.float32) # 一个head的输出
-        complex_output_bf16 = tl.cast(vx1_fp64*vy1_fp64 + coe*vx2_fp64*vy2_fp64,tl.float32) # rope输出是float32格式,但是后续做alltoall之前又被转换成了bfloat16,因此这里提前转换再写入
+        complex_output_bf16 = tl.cast(vx1_fp64*vy1_fp64 + coe*vx2_fp64*vy2_fp64,tl.bfloat16) # rope输出是float32格式,但是后续做alltoall之前又被转换成了bfloat16,因此这里提前转换再写入
         tl.store(output_ptr_block + head_idx * PROG_SIZE,complex_output_bf16,mask=output_mask)
         # 这个head数据需要写到哪张卡哪个地址上?
 
@@ -336,15 +336,15 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
     # q = iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
     # rope_triton_kernel_fp32[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_buffer_tensor,world_size,heap_bases)
     # k = iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
-    q_buffer = torch.zeros_like(q)
-    k_buffer = torch.zeros_like(k)
+    q_buffer = half(torch.zeros_like(q))
+    k_buffer = half(torch.zeros_like(k))
 
     rope_triton_kernel[(sp_seq_len,1,1)](q,freqs_i,q_buffer,hs,rank,sp_seq_len,hn)
     rope_triton_kernel[(sp_seq_len,1,1)](k,freqs_i,k_buffer,hs,rank,sp_seq_len,hn)
-    q=half(q_buffer)
-    k=half(k_buffer)
+    q=q_buffer
+    k=k_buffer
     v=half(v)
-    # print(f"rank {rank} debug:=====> after all to all fusion {q.shape = },{q.dtype = } \n")
+    print(f"rank {rank} debug:=====> after rope kernel {q.dtype = },{k.dtype = } \n")
     # k_alltoall_buffer = torch.zeros([bs,sp_seq_len * world_size,hn//world_size,hs],dtype = x.dtype,device=x.device)
 
     q = all_to_all(q, scatter_dim=2, gather_dim=1)
