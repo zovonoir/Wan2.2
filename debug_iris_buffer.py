@@ -1,9 +1,21 @@
+import os
 import torch
 import torch.distributed as dist
+import iris
+rank = int(os.environ["RANK"])
+world_size =  int(os.environ["WORLD_SIZE"])
+dist.init_process_group(
+    backend="nccl",
+    device_id=torch.device(f"cuda:{rank}"),
+    world_size=world_size,
+    rank=rank,
+    init_method="tcp://127.0.0.1:29500")
+shmem = iris.iris(13640*40*128*2)
+all_to_all_iris = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
+
 import triton
 import triton.language as tl
-import iris
-import os
+
 
 
 @triton.jit
@@ -111,29 +123,202 @@ def rope_triton_kernel_fp16(qk_ptr, freqs_ptr,
         complex_output_bf16 = tl.cast(vx1_fp64*vy1_fp64 + coe*vx2_fp64*vy2_fp64,tl.bfloat16) # rope输出是float32格式,但是后续做alltoall之前又被转换成了bfloat16,因此这里提前转换再写入
         tl.store(output_ptr_block + head_idx * PROG_SIZE,complex_output_bf16,mask=output_mask)
 
+def get_rank():
+    return int(os.environ["RANK"])
+    
+def rope_apply(x, grid_sizes, freqs):
+    """
+    x:          [B, L, N, C].
+    grid_sizes: [B, 3].
+    freqs:      [M, C // 2].
+    """
+    s, n, c = x.size(1), x.size(2), x.size(3) // 2
+    # split freqs
+    freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
 
-rank = int(os.environ["RANK"])
-world_size =  int(os.environ["WORLD_SIZE"])
-dist.init_process_group(
-    backend="nccl",
-    device_id=torch.device(f"cuda:{rank}"),
-    world_size=world_size)
-shmem = iris.iris(1024*1024*1024*4)
-all_to_all_iris = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
+    # loop over samples
+    output = []
+    for i, (f, h, w) in enumerate(grid_sizes.tolist()):
+        seq_len = f * h * w
 
-q = torch.load(f"rank_{rank}_before_rope_q.pt")
+        # precompute multipliers
+        x_i = torch.view_as_complex(x[i, :s].to(torch.float64).reshape(
+            s, n, -1, 2))
+        freqs_i = torch.cat([
+            freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
+            freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
+            freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
+        ],
+                            dim=-1).reshape(seq_len, 1, -1)
+
+        # apply rotary embedding
+        sp_size = 8
+        sp_rank = get_rank()
+        # freqs_i = pad_freqs(freqs_i, s * sp_size)
+        # torch.save(freqs_i,f"rank_{get_rank()}_freqs_i.pt")
+        s_per_rank = s
+        freqs_i_rank = freqs_i[(sp_rank * s_per_rank):((sp_rank + 1) *
+                                                       s_per_rank), :, :]
+        x_i = torch.view_as_real(x_i * freqs_i_rank).flatten(2)
+        x_i = torch.cat([x_i, x[i, s:]])
+
+        # append to collection
+        output.append(x_i)
+    return torch.stack(output).float()
+
+def all_to_all(x, scatter_dim, gather_dim, group=None, **kwargs):
+    """
+    `scatter` along one dimension and `gather` along another.
+    """
+    world_size = 8
+    if world_size > 1:
+        inputs = [u.contiguous() for u in x.chunk(world_size, dim=scatter_dim)]
+        outputs = [torch.empty_like(u) for u in inputs]
+        dist.all_to_all(outputs, inputs, group=group, **kwargs)
+        x = torch.cat(outputs, dim=gather_dim).contiguous()
+    return x
+
+@triton.jit
+def all_to_all_triton(data, # bf16
+        PROG_SIZE:tl.constexpr,
+        head_num:tl.constexpr,
+        seq_per_rank:tl.constexpr,
+        local_rank:tl.constexpr,
+        world_size:tl.constexpr,
+        iris_buffer,
+        heap_bases:tl.tensor):
+
+    input_head_num = head_num # 40
+    output_head_num = input_head_num // world_size # 5
+    input_seq_len = seq_per_rank # 13640
+    # output_seq_len = input_seq_len * world_size # 109120
+    program_id = tl.program_id(0)
+    start_ptr = data + program_id * head_num * PROG_SIZE
+    for head_idx in tl.range(0,head_num,1):
+        target_rank = head_idx // output_head_num
+        head_idx_in_target_rank = head_idx - (target_rank * output_head_num) # 0-4 per rank
+        token_id_in_target_rank = local_rank * input_seq_len + program_id # 0-109120
+        offset_in_target_rank = output_head_num * PROG_SIZE * token_id_in_target_rank + \
+                        PROG_SIZE * head_idx_in_target_rank
+        target_pointers = iris_buffer + offset_in_target_rank + tl.arange(0,PROG_SIZE)
+        head_data_offset = head_idx * PROG_SIZE + tl.arange(0,PROG_SIZE)
+        complex_output_bf16 = tl.load(start_ptr + head_data_offset,mask = tl.arange(0,PROG_SIZE) < PROG_SIZE)
+        iris.store(
+                pointer = target_pointers, # iris_buffer + head_idx*PROG_SIZE +tl.arange(0,PROG_SIZE), #target_pointers,
+                value = complex_output_bf16,
+                from_rank = local_rank,
+                to_rank = target_rank,
+                heap_bases = heap_bases,
+                mask = None
+            )
+
+@triton.jit
+def all_to_all_triton2(data, # bf16
+        local_rank:tl.constexpr,
+        iris_buffer,
+        heap_bases:tl.tensor):
+    pid = tl.program_id(0)
+    local_start_ptr = data + pid * 40 * 128
+    for dst_rank in tl.range(0,8):
+        local_src_ptrs = local_start_ptr + dst_rank * 128*5 + tl.arange(0,128*8)
+        head_data = tl.load(local_src_ptrs,mask=tl.arange(0,128*8) < 128*5)
+        dst_1 = iris_buffer + local_rank*13640*128*5 + pid*128*5+tl.arange(0,128*8)
+        iris.store(
+            pointer = dst_1,
+            value = head_data,
+            from_rank = local_rank,
+            to_rank = dst_rank,
+            heap_bases = heap_bases,
+            mask=tl.arange(0,128*8) < 128*5
+        )
+
+@triton.jit
+def all_to_all_triton3(data, # bf16
+        PROG_SIZE:tl.constexpr,
+        head_num:tl.constexpr,
+        seq_per_rank:tl.constexpr,
+        local_rank:tl.constexpr,
+        world_size:tl.constexpr,
+        iris_buffer,
+        heap_bases:tl.tensor):
+
+    program_id = tl.program_id(0)
+    start_ptr = data + program_id * 40 * 128
+    for head_idx in tl.range(0,40,1):
+        target_rank = head_idx // 5
+        head_idx_in_target_rank = head_idx - (target_rank * 5) # 0-4 per rank
+        token_id_in_target_rank = local_rank * 13640 + program_id # 0-109120
+        offset_in_target_rank = 5*128*token_id_in_target_rank+128*head_idx_in_target_rank
+        target_pointers = iris_buffer + offset_in_target_rank + tl.arange(0,128)
+        head_data_offset = head_idx * 128 + tl.arange(0,128)
+        complex_output_bf16 = tl.load(start_ptr + head_data_offset,mask = None)
+        iris.store(
+                pointer = target_pointers, 
+                value = complex_output_bf16,
+                from_rank = local_rank,
+                to_rank = target_rank,
+                heap_bases = heap_bases,
+                mask = None
+            )
+
+q = torch.load(f"rank_{rank}_before_rope_q.pt") # fp32
 k = torch.load(f"rank_{rank}_before_rope_k.pt")
 v = torch.load(f"rank_{rank}_before_rope_v.pt")
-print(q.dtype,k.dtype,v.dtype)
+
 freqs_i = torch.load(f"rank_{rank}_freqs_i.pt")
+freqs = torch.load(f"rank_{rank}_freqs.pt")
 grid_size = torch.load(f"rank_{rank}_grid_sizes.pt")
 
-q_after_rope = torch.load(f"rank_{rank}_rope_half_output_q.pt")
-k_after_rope = torch.load(f"rank_{rank}_rope_half_output_k.pt")
-v_after_rope = torch.load(f"rank_{rank}_rope_half_output_v.pt")
-freqs_i = torch.view_as_real(freqs_i)
-q_triton_output = torch.zeros_like(q).to(torch.bfloat16)
-k_triton_output = torch.zeros_like(k).to(torch.bfloat16)
-rope_triton_kernel_fp16[(13640,1,1)](q,freqs_i,q_triton_output,128,rank,13640,40)
-rope_triton_kernel_fp16[(13640,1,1)](k,freqs_i,k_triton_output,128,rank,13640,40)
-print(f"rank {rank} SAME?  {1-torch.abs((q_triton_output - q_after_rope)).mean().item()} \n")
+q_reference = rope_apply(q,grid_size,freqs).to(torch.bfloat16)
+k_reference = rope_apply(k,grid_size,freqs).to(torch.bfloat16)
+q_after_rope = torch.load(f"rank_{rank}_rope_half_output_before_alltoall_q.pt")
+k_after_rope = torch.load(f"rank_{rank}_rope_half_output_before_alltoall_k.pt")
+v_after_rope = torch.load(f"rank_{rank}_rope_half_output_before_alltoall_v.pt")
+
+q_alltoall_reference = all_to_all(q_after_rope,scatter_dim=2,gather_dim=1)
+k_alltoall_reference = all_to_all(k_after_rope,scatter_dim=2,gather_dim=1)
+
+q_empty = torch.empty_like(q_alltoall_reference)
+
+if True: # 测试 all to all结果
+    all_to_all_triton[(13640,1,1)](q_after_rope,128,40,13640,rank,8,all_to_all_iris,shmem.get_heap_bases())
+    shmem.barrier()
+    qq=all_to_all_iris.clone()
+    
+    print(f"rank {rank} SAME?  {1-torch.abs((qq - q_alltoall_reference)).sum().item()} \n")
+    # all_to_all_triton[(13640,1,1)](k_after_rope,128,40,13640,rank,8,all_to_all_iris,shmem.get_heap_bases())
+    # kk = all_to_all_iris.clone()
+    # print(f"rank {rank} SAME?  {1-torch.abs((kk - k_alltoall_reference)).sum().item()} \n")
+
+# q_alltoall_true = torch.load(f"rank_{rank}_after_alltoall_q.pt")
+# k_alltoall_true = torch.load(f"rank_{rank}_after_alltoall_k.pt")
+# print(f"rank {rank} SAME?  {1-torch.abs((q_alltoall_true - q_alltoall_reference)).sum().item()} \n")
+# print(f"rank {rank} SAME?  {1-torch.abs((k_alltoall_true - k_alltoall_reference)).sum().item()} \n")
+# freqs_i = torch.view_as_real(freqs_i)
+
+# rope_triton_kernel_fp16_with_alltoall[(13640,1,1)](q,freqs_i,128,rank,13640,40,all_to_all_iris,8,shmem.get_heap_bases())
+# all_to_all_triton[(13640,1,1)](q_after_rope,128,40,13640,rank,8,all_to_all_iris,shmem.get_heap_bases())
+# all_to_all_triton[(13640,1,1)](q,128,40,13640,rank,8,all_to_all_iris,shmem.get_heap_bases())
+# q=all_to_all(q_after_rope,2,1)
+# all_to_all_triton2[(13640,1,1)](q_after_rope,rank,all_to_all_iris,shmem.get_heap_bases())
+# print(f"rank {rank} {torch.abs(all_to_all_iris-q_alltoall_true).max().item()}")
+# print(torch.abs(all_to_all_iris-q_alltoall_true))
+# print(f"rank {rank} SAME?  {1-torch.abs((freqs_i_reference - freqs_i)).sum().item()} \n")
+
+# freqs_i = torch.view_as_real(freqs_i)
+# q_triton_output = torch.empty_like(q_after_rope).to(torch.bfloat16)
+# k_triton_output = torch.empty_like(k_after_rope).to(torch.bfloat16)
+# rope_triton_kernel_fp16[(13640,1,1)](q,freqs_i,q_triton_output,128,rank,13640,40)
+# q=all_to_all(q_triton_output,2,1)
+# print(f"rank {rank} SAME?  {1-torch.abs((q - q_alltoall_reference)).sum().item()} \n")
+# # rope_triton_kernel_fp16[(13640,1,1)](k,freqs_i,k_triton_output,128,rank,13640,40)
+# print(f"rank {rank} SAME?  {1-torch.abs((q_triton_output - q_after_rope)).sum().item()} \n")
+# yy = torch.abs(q_triton_output - q_after_rope).reshape(13640*40,128)
+# count = 0
+# for i in yy:
+#     if i.max() > 0.0000001:
+#         print(f"{count = },i={i},{i.max() = }")
+#     count +=1
+
+
+

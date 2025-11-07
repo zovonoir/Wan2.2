@@ -288,7 +288,7 @@ def sp_dit_forward(
     return [u.float() for u in x]
 
 
-def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16):
+def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16):
     assert isinstance(freqs_i,tuple)
     freqs_i,shmem_handle,iris_buffer_tensor = freqs_i
 
@@ -336,7 +336,7 @@ def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat1
         k = all_to_all(k, scatter_dim=2, gather_dim=1)
         v = all_to_all(v, scatter_dim=2, gather_dim=1)
 
-    if False: # 但是这一段带上alltoall的功能就失效
+    if True: # 但是这一段带上alltoall的功能就失效
         bs = q.shape[0]
         hs = q.shape[-1]
         rank = get_rank()
@@ -344,13 +344,17 @@ def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat1
         hn = q.shape[2]
         world_size = get_world_size()
         heap_bases = shmem_handle.get_heap_bases()
-        q_alltoall_buffer = torch.empty([bs,sp_seq_len * world_size,hn//world_size,hs],dtype = dtype,device=x.device)
+        # q_alltoall_buffer = torch.empty([bs,sp_seq_len * world_size,hn//world_size,hs],dtype = dtype,device=x.device)
         rope_triton_kernel_fp16_with_alltoall[(sp_seq_len,1,1)](q,freqs_i,hs,rank,sp_seq_len,hn, iris_buffer_tensor,world_size,heap_bases)
-        q = q_alltoall_buffer.copy_(iris_buffer_tensor) # iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
-        rope_triton_kernel_fp16_with_alltoall[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_buffer_tensor,world_size,heap_bases)
-        k = q_alltoall_buffer.copy_(iris_buffer_tensor) #iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
+        shmem_handle.barrier()
+        q = iris_buffer_tensor.clone() # iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
 
-    if True: # q执行alltoall kernel,k执行rope kernel
+        rope_triton_kernel_fp16_with_alltoall[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_buffer_tensor,world_size,heap_bases)
+        shmem_handle.barrier()
+        k = iris_buffer_tensor.clone() #iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
+        
+
+    if False: # q执行alltoall kernel,k执行rope kernel
         bs = q.shape[0]
         hs = q.shape[-1]
         rank = get_rank()
