@@ -288,7 +288,7 @@ def sp_dit_forward(
     return [u.float() for u in x]
 
 
-def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16):
+def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16):
     assert isinstance(freqs_i,tuple)
     freqs_i,shmem_handle,iris_buffer_tensor = freqs_i
 
@@ -345,7 +345,7 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
     q=q_buffer
     k=k_buffer
     v=half(v)
-    print(f"rank {rank} debug:=====> after rope kernel {q.dtype = },{k.dtype = } \n")
+    # print(f"rank {rank} debug:=====> after rope kernel {q.dtype = },{k.dtype = } \n")
     # k_alltoall_buffer = torch.zeros([bs,sp_seq_len * world_size,hn//world_size,hs],dtype = x.dtype,device=x.device)
 
     q = all_to_all(q, scatter_dim=2, gather_dim=1)
