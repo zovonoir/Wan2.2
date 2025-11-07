@@ -17,11 +17,11 @@ def rope_triton_kernel(qk_ptr, freqs_ptr,
                     PROG_SIZE:tl.constexpr,# = head_size
                     sp_rank:tl.constexpr, # [0-7]
                     s_per_rank:tl.constexpr, # 13640
-                    head_num:tl.constexpr # 40
+                    head_num:tl.constexpr, # 40
                     # alltoall
-                    # iris_buffer,
-                    # world_size:tl.constexpr,
-                    # heap_bases:tl.tensor
+                    iris_buffer,
+                    world_size:tl.constexpr,
+                    heap_bases:tl.tensor
                     ):
     # tl.static_assert(0)
     # 每个program负责一个token,共40*128=5120个float32相乘
@@ -50,10 +50,10 @@ def rope_triton_kernel(qk_ptr, freqs_ptr,
     output_ptr_block = output_ptr + program_id * PROG_SIZE * head_num + tl.arange(0,PROG_SIZE)
     output_mask = tl.arange(0,PROG_SIZE) < PROG_SIZE
     # # alltoall 4D输出形状
-    # input_head_num = head_num
-    # output_head_num = input_head_num // world_size
-    # input_seq_len = s_per_rank
-    # output_seq_len = input_seq_len * world_size
+    input_head_num = head_num
+    output_head_num = input_head_num // world_size
+    input_seq_len = s_per_rank
+    output_seq_len = input_seq_len * world_size
     # [1,input_seq_len,input_head_num,head_size] -> [1,input_seq_len * world_size,input_head_num / world_size,head_size]
 
     for head_idx in tl.range(0,head_num,1): # 在head 维度循环,每个program计算一个token的数据量
@@ -62,22 +62,22 @@ def rope_triton_kernel(qk_ptr, freqs_ptr,
         vx2_fp64 = tl.cast(tl.load(vx1_ptr_block_odd + head_idx * PROG_SIZE,mask=odd_mask,other=0.0),tl.float64)
         # complex_output = tl.cast(vx1*vy1 + coe*vx2*vy2,tl.float32) # 一个head的输出
         complex_output_bf16 = tl.cast(vx1_fp64*vy1_fp64 + coe*vx2_fp64*vy2_fp64,tl.bfloat16) # rope输出是float32格式,但是后续做alltoall之前又被转换成了bfloat16,因此这里提前转换再写入
-        tl.store(output_ptr_block + head_idx * PROG_SIZE,complex_output_bf16,mask=output_mask)
+        # tl.store(output_ptr_block + head_idx * PROG_SIZE,complex_output_bf16,mask=output_mask)
         # 这个head数据需要写到哪张卡哪个地址上?
 
-        # target_rank = head_idx // output_head_num
-        # head_idx_in_target_rank = head_idx - ((head_idx // output_head_num) * output_head_num) # 0-4 per rank
-        # token_id_in_target_rank = sp_rank * input_seq_len + program_id # 0-109120
-        # offset_in_target_rank = output_head_num * PROG_SIZE * token_id_in_target_rank + PROG_SIZE * head_idx_in_target_rank
-        # target_pointers = iris_buffer + offset_in_target_rank + tl.arange(0,PROG_SIZE)
-        # iris.store(
-        #         pointer = target_pointers, # iris_buffer + head_idx*PROG_SIZE +tl.arange(0,PROG_SIZE), #target_pointers,
-        #         value = complex_output_bf16,
-        #         from_rank = sp_rank,
-        #         to_rank = target_rank,
-        #         heap_bases = heap_bases,
-        #         mask = None
-        #     )
+        target_rank = head_idx // output_head_num
+        head_idx_in_target_rank = head_idx - ((head_idx // output_head_num) * output_head_num) # 0-4 per rank
+        token_id_in_target_rank = sp_rank * input_seq_len + program_id # 0-109120
+        offset_in_target_rank = output_head_num * PROG_SIZE * token_id_in_target_rank + PROG_SIZE * head_idx_in_target_rank
+        target_pointers = iris_buffer + offset_in_target_rank + tl.arange(0,PROG_SIZE)
+        iris.store(
+                pointer = target_pointers, # iris_buffer + head_idx*PROG_SIZE +tl.arange(0,PROG_SIZE), #target_pointers,
+                value = complex_output_bf16,
+                from_rank = sp_rank,
+                to_rank = target_rank,
+                heap_bases = heap_bases,
+                mask = None
+            )
 
 
 
@@ -193,6 +193,7 @@ def rope_apply(x, grid_sizes, freqs):
         sp_size = get_world_size()
         sp_rank = get_rank()
         freqs_i = pad_freqs(freqs_i, s * sp_size)
+        torch.save(freqs_i,f"rank_{get_rank()}_freqs_i.pt")
         s_per_rank = s
         freqs_i_rank = freqs_i[(sp_rank * s_per_rank):((sp_rank + 1) *
                                                        s_per_rank), :, :]
@@ -336,8 +337,8 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
     # q = iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
     # rope_triton_kernel_fp32[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_buffer_tensor,world_size,heap_bases)
     # k = iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
-    q_buffer = half(torch.zeros_like(q))
-    k_buffer = half(torch.zeros_like(k))
+    q_buffer = half(torch.empty_like(q))
+    k_buffer = half(torch.empty_like(k))
 
     rope_triton_kernel[(sp_seq_len,1,1)](q,freqs_i,q_buffer,hs,rank,sp_seq_len,hn)
     rope_triton_kernel[(sp_seq_len,1,1)](k,freqs_i,k_buffer,hs,rank,sp_seq_len,hn)
@@ -366,7 +367,7 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
     x = self.o(x)
     return x
 
-def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
+def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
     b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
     half_dtypes = (torch.float16, torch.bfloat16)
 
@@ -396,10 +397,10 @@ def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16)
     k=half(k)
     v=half(v)
     # 此处将qkv tensor保存下来,然后assert
-    torch.save(q,f"rank_{rank}_rope_half_output_q.pt")
-    torch.save(k,f"rank_{rank}_rope_half_output_k.pt")
-    torch.save(v,f"rank_{rank}_rope_half_output_v.pt")
-    assert 0,"saving complete!"
+    torch.save(q,f"rank_{rank}_rope_half_output_before_alltoall_q.pt")
+    torch.save(k,f"rank_{rank}_rope_half_output_before_alltoall_k.pt")
+    torch.save(v,f"rank_{rank}_rope_half_output_before_alltoall_v.pt")
+    # assert 0,"saving complete!"
 
     x = distributed_attention(
         q,k,v,
