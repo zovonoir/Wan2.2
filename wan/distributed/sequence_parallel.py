@@ -352,7 +352,8 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
         rope_triton_kernel_fp16_with_alltoall[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_buffer_tensor,world_size,heap_bases)
         shmem_handle.barrier()
         k = iris_buffer_tensor.clone() #iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
-        
+        v=half(v)
+        v=all_to_all(v,2,1)
 
     if False: # q执行alltoall kernel,k执行rope kernel
         bs = q.shape[0]
