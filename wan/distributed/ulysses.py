@@ -35,10 +35,10 @@ def distributed_attention(
     q = all_to_all(q, scatter_dim=2, gather_dim=1)
     k = all_to_all(k, scatter_dim=2, gather_dim=1)
     v = all_to_all(v, scatter_dim=2, gather_dim=1)
-    torch.save(q,f"rank_{rank}_after_alltoall_q.pt")
-    torch.save(k,f"rank_{rank}_after_alltoall_k.pt")
-    torch.save(v,f"rank_{rank}_after_alltoall_v.pt")
-    assert 0,"saving complete!!"
+    # torch.save(q,f"rank_{rank}_after_alltoall_q.pt")
+    # torch.save(k,f"rank_{rank}_after_alltoall_k.pt")
+    # torch.save(v,f"rank_{rank}_after_alltoall_v.pt")
+    # assert 0,"saving complete!!"
     # print(f"rank {rank} debug:======> original AFTER all to all {q.mean() = },{k.mean() = },{v.mean() = } \n")
 
     # apply attention
