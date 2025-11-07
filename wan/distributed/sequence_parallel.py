@@ -387,7 +387,7 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
     x = self.o(x)
     return x
 
-def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
+def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
     b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
     half_dtypes = (torch.float16, torch.bfloat16)
 
@@ -402,7 +402,7 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
         return q, k, v
 
     q, k, v = qkv_fn(x)
-
+    assert 0,"ERROR!"
     # 保存qkv
     rank = get_rank()
     torch.save(q,f"rank_{rank}_before_rope_q.pt")
