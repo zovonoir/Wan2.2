@@ -288,7 +288,7 @@ def sp_dit_forward(
     return [u.float() for u in x]
 
 
-def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16):
+def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16):
     assert isinstance(freqs_i,tuple)
     freqs_i,shmem_handle,iris_buffer_tensor = freqs_i
 
@@ -329,29 +329,27 @@ def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat1
     sp_seq_len = q.shape[1]
     hn = q.shape[2]
     world_size = get_world_size()
-    # heap_bases = shmem_handle.get_heap_bases()
-    # q_alltoall_buffer = torch.zeros([bs,sp_seq_len * world_size,hn//world_size,hs],dtype = x.dtype,device=x.device)
-    # print(f"rank {rank} debug:====> {q.shape = },{q.dtype = },{k.shape = },{k.dtype = },{v.shape = },{v.dtype = },{freqs_i.shape = },{freqs_i.dtype = },{rank = },{iris_buffer_tensor.shape = },{iris_buffer_tensor.dtype = } \n")
-    
-    # rope_triton_kernel_fp32[(sp_seq_len,1,1)](q,freqs_i,hs,rank,sp_seq_len,hn, iris_buffer_tensor,world_size,heap_bases)
-    # q = iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
-    # rope_triton_kernel_fp32[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_buffer_tensor,world_size,heap_bases)
-    # k = iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
-    q_buffer = half(torch.empty_like(q))
-    k_buffer = half(torch.empty_like(k))
+    heap_bases = shmem_handle.get_heap_bases()
+    q_alltoall_buffer = torch.empty([bs,sp_seq_len * world_size,hn//world_size,hs],dtype = dtype,device=x.device)
+    rope_triton_kernel_fp32[(sp_seq_len,1,1)](q,freqs_i,hs,rank,sp_seq_len,hn, iris_buffer_tensor,world_size,heap_bases)
+    q = q_alltoall_buffer.copy_(iris_buffer_tensor) # iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
+    rope_triton_kernel_fp32[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_buffer_tensor,world_size,heap_bases)
+    k = q_alltoall_buffer.copy_(iris_buffer_tensor) #iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
 
-    rope_triton_kernel[(sp_seq_len,1,1)](q,freqs_i,q_buffer,hs,rank,sp_seq_len,hn)
-    rope_triton_kernel[(sp_seq_len,1,1)](k,freqs_i,k_buffer,hs,rank,sp_seq_len,hn)
-    q=q_buffer
-    k=k_buffer
+
+
+    # q_buffer = half(torch.empty_like(q))
+    # k_buffer = half(torch.empty_like(k))
+    # rope_triton_kernel[(sp_seq_len,1,1)](q,freqs_i,q_buffer,hs,rank,sp_seq_len,hn)
+    # rope_triton_kernel[(sp_seq_len,1,1)](k,freqs_i,k_buffer,hs,rank,sp_seq_len,hn)
+    # q=q_buffer
+    # k=k_buffer
     v=half(v)
-    # print(f"rank {rank} debug:=====> after rope kernel {q.dtype = },{k.dtype = } \n")
-    # k_alltoall_buffer = torch.zeros([bs,sp_seq_len * world_size,hn//world_size,hs],dtype = x.dtype,device=x.device)
-
-    q = all_to_all(q, scatter_dim=2, gather_dim=1)
-    k = all_to_all(k, scatter_dim=2, gather_dim=1)
+    # q = all_to_all(q, scatter_dim=2, gather_dim=1)
+    # k = all_to_all(k, scatter_dim=2, gather_dim=1)
     v = all_to_all(v, scatter_dim=2, gather_dim=1)
-    # print(f"rank {get_rank()} debug:====> triton AFTER all to all {q.mean() = },{k.mean() = },{v.mean() = }")
+
+
 
 
     x = flash_attention(
@@ -367,7 +365,7 @@ def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat1
     x = self.o(x)
     return x
 
-def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
+def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
     b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
     half_dtypes = (torch.float16, torch.bfloat16)
 
