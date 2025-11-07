@@ -332,8 +332,8 @@ def generate(args):
             rank=rank,
             world_size=world_size)
 
-        # shmem = iris.iris(1024*1024*1024*4) # 4G
-        # all_to_all_buffer = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda") # 这里的参数量后面再补充为可配置的
+        shmem = iris.iris(1024*1024*1024*4) # 4G
+        all_to_all_buffer = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda") # 这里的参数量后面再补充为可配置的
 
     else:
         assert not (
