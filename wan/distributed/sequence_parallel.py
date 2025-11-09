@@ -196,7 +196,7 @@ def triton_all_to_all_4D_bf16_backward(data, # bf16
         target_rank_data_start_offsets = iris_buffer + token_id * out_hn * hs + (local_rank * in_hn*hs) + tl.arange(0,hs)
         for head_idx in tl.range(0,in_hn):
             local_ptrs = local_rank_data_start_offsets + head_idx * hs
-            head_data = tl.load(local_ptrs,mmask=None)
+            head_data = tl.load(local_ptrs,mask=None)
             remote_ptrs = target_rank_data_start_offsets + (head_idx * hs)
             # write to target rank
             iris.store(
@@ -457,7 +457,7 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
     triton_all_to_all_4D_bf16_backward[(sp_seq_len,1,1)](x,hs,hn,sp_seq_len,rank,world_size,iris_o,heap_bases)
     x = x.flatten(2)
     shmem_handle.barrier()
-    
+
     x = self.o(x)
     return x
 
