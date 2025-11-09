@@ -241,7 +241,7 @@ class WanI2V:
                  seed=-1,
                  offload_model=True,
                  iris_shm_handle = None,
-                 iris_buffer_tensor = None):
+                 iris_buffer_list = None):
         r"""
         Generates video frames from input image and text prompt using diffusion process.
 
@@ -280,7 +280,7 @@ class WanI2V:
                 - H: Frame height (from max_area)
                 - W: Frame width from max_area)
         """
-        assert ((iris_shm_handle is not None) and (iris_buffer_tensor is not None)) or ((iris_shm_handle is None) and (iris_buffer_tensor is None))
+        assert ((iris_shm_handle is not None) and (iris_buffer_list is not None)) or ((iris_shm_handle is None) and (iris_buffer_list is None))
         # preprocess
         guide_scale = (guide_scale, guide_scale) if isinstance(
             guide_scale, float) else guide_scale
@@ -396,10 +396,10 @@ class WanI2V:
 
             self.high_noise_model.freqs_i= real_freq_i
             self.high_noise_model.shmem_handle = iris_shm_handle
-            self.high_noise_model.iris_buffer_tensor = iris_buffer_tensor
+            self.high_noise_model.iris_buffer_list = iris_buffer_list
             self.low_noise_model.freqs_i= real_freq_i
             self.low_noise_model.shmem_handle = iris_shm_handle
-            self.low_noise_model.iris_buffer_tensor = iris_buffer_tensor
+            self.low_noise_model.iris_buffer_list = iris_buffer_list
             
             arg_c = {
                 'context': [context[0]],

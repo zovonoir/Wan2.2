@@ -179,33 +179,33 @@ def all_to_all(x, scatter_dim, gather_dim, group=None, **kwargs):
     return x
 
 @triton.jit
-def all_to_all_triton(data, # bf16
-        PROG_SIZE:tl.constexpr,
-        head_num:tl.constexpr,
+def triton_all_to_all_4D(data, # bf16
+        hs:tl.constexpr,
+        hn:tl.constexpr,
         seq_per_rank:tl.constexpr,
         local_rank:tl.constexpr,
         world_size:tl.constexpr,
         iris_buffer,
         heap_bases:tl.tensor):
 
-    input_head_num = head_num # 40
+    input_head_num = hn # 40
     output_head_num = input_head_num // world_size # 5
     input_seq_len = seq_per_rank # 13640
     # output_seq_len = input_seq_len * world_size # 109120
     program_id = tl.program_id(0)
-    start_ptr = data + program_id * head_num * PROG_SIZE
-    for head_idx in tl.range(0,head_num,1):
+    start_ptr = data + program_id * hn * hs
+    for head_idx in tl.range(0,hn,1):
         target_rank = head_idx // output_head_num
         head_idx_in_target_rank = head_idx - (target_rank * output_head_num) # 0-4 per rank
         token_id_in_target_rank = local_rank * input_seq_len + program_id # 0-109120
-        offset_in_target_rank = output_head_num * PROG_SIZE * token_id_in_target_rank + \
-                        PROG_SIZE * head_idx_in_target_rank
-        target_pointers = iris_buffer + offset_in_target_rank + tl.arange(0,PROG_SIZE)
-        head_data_offset = head_idx * PROG_SIZE + tl.arange(0,PROG_SIZE)
-        complex_output_bf16 = tl.load(start_ptr + head_data_offset,mask = tl.arange(0,PROG_SIZE) < PROG_SIZE)
+        offset_in_target_rank = output_head_num * hs * token_id_in_target_rank + \
+                        hs * head_idx_in_target_rank
+        target_pointers = iris_buffer + offset_in_target_rank + tl.arange(0,hs)
+        head_data_offset = head_idx * hs + tl.arange(0,hs)
+        value_bf16 = tl.cast(tl.load(start_ptr + head_data_offset,mask = None),tl.bfloat16)
         iris.store(
-                pointer = target_pointers, # iris_buffer + head_idx*PROG_SIZE +tl.arange(0,PROG_SIZE), #target_pointers,
-                value = complex_output_bf16,
+                pointer = target_pointers,
+                value = value_bf16,
                 from_rank = local_rank,
                 to_rank = target_rank,
                 heap_bases = heap_bases,

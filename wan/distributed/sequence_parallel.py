@@ -150,6 +150,40 @@ def rope_triton_kernel_fp16_with_alltoall(qk_ptr, freqs_ptr,
             )
 
 
+@triton.jit
+def triton_all_to_all_4D(data, # bf16
+        hs:tl.constexpr,
+        hn:tl.constexpr,
+        seq_per_rank:tl.constexpr,
+        local_rank:tl.constexpr,
+        world_size:tl.constexpr,
+        iris_buffer,
+        heap_bases:tl.tensor):
+
+    input_head_num = hn # 40
+    output_head_num = input_head_num // world_size # 5
+    input_seq_len = seq_per_rank # 13640
+    program_id = tl.program_id(0)
+    start_ptr = data + program_id * hn * hs
+    for head_idx in tl.range(0,hn,1):
+        target_rank = head_idx // output_head_num
+        head_idx_in_target_rank = head_idx - (target_rank * output_head_num) # 0-4 per rank
+        token_id_in_target_rank = local_rank * input_seq_len + program_id # 0-109120
+        offset_in_target_rank = output_head_num * hs * token_id_in_target_rank + \
+                        hs * head_idx_in_target_rank
+        target_pointers = iris_buffer + offset_in_target_rank + tl.arange(0,hs)
+        head_data_offset = head_idx * hs + tl.arange(0,hs)
+        value_bf16 = tl.cast(tl.load(start_ptr + head_data_offset,mask = None),tl.bfloat16)
+        iris.store(
+                pointer = target_pointers,
+                value = value_bf16,
+                from_rank = local_rank,
+                to_rank = target_rank,
+                heap_bases = heap_bases,
+                mask = None
+            )
+
+
 def pad_freqs(original_tensor, target_len):
     seq_len, s1, s2 = original_tensor.shape
     pad_size = target_len - seq_len
@@ -270,7 +304,7 @@ def sp_dit_forward(
         e=e0,
         seq_lens=seq_lens,
         grid_sizes=grid_sizes, # not useful
-        freqs=self.freqs if not hasattr(self,"freqs_i") else (self.freqs_i,self.shmem_handle,self.iris_buffer_tensor),
+        freqs=self.freqs if not hasattr(self,"freqs_i") else (self.freqs_i,self.shmem_handle,self.iris_buffer_list),
         context=context,
         context_lens=context_lens)
 
@@ -290,7 +324,8 @@ def sp_dit_forward(
 
 def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16):
     assert isinstance(freqs_i,tuple)
-    freqs_i,shmem_handle,iris_buffer_tensor = freqs_i
+    freqs_i,shmem_handle,iris_buffer_list = freqs_i
+    iris_q,iris_k,iris_v = iris_buffer_list
 
     b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
     half_dtypes = (torch.float16, torch.bfloat16)
@@ -345,15 +380,21 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
         world_size = get_world_size()
         heap_bases = shmem_handle.get_heap_bases()
         # q_alltoall_buffer = torch.empty([bs,sp_seq_len * world_size,hn//world_size,hs],dtype = dtype,device=x.device)
-        rope_triton_kernel_fp16_with_alltoall[(sp_seq_len,1,1)](q,freqs_i,hs,rank,sp_seq_len,hn, iris_buffer_tensor,world_size,heap_bases)
-        shmem_handle.barrier()
-        q = iris_buffer_tensor.clone() # iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
+        rope_triton_kernel_fp16_with_alltoall[(sp_seq_len,1,1)](q,freqs_i,hs,rank,sp_seq_len,hn, iris_q,world_size,heap_bases)
+        # shmem_handle.barrier()
+        # q = iris_q.clone() # iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
 
-        rope_triton_kernel_fp16_with_alltoall[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_buffer_tensor,world_size,heap_bases)
+        rope_triton_kernel_fp16_with_alltoall[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_k,world_size,heap_bases)
+        # shmem_handle.barrier()
+        # k = iris_k.clone() #iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
+        # v=half(v)
+        # v=all_to_all(v,2,1)
+        triton_all_to_all_4D[(sp_seq_len,1,1)](v,hs,hn,sp_seq_len,rank,world_size,iris_v,heap_bases)
         shmem_handle.barrier()
-        k = iris_buffer_tensor.clone() #iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
-        v=half(v)
-        v=all_to_all(v,2,1)
+        q = iris_q.clone()
+        k = iris_k.clone()
+        v = iris_v.clone()
+        
 
     if False: # q执行alltoall kernel,k执行rope kernel
         bs = q.shape[0]

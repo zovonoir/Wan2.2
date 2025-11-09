@@ -333,8 +333,10 @@ def generate(args):
             world_size=world_size)
 
         shmem = iris.iris(1024*1024*1024*4) # 4G
-        all_to_all_buffer = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda") # 这里的参数量后面再补充为可配置的
-
+        all_to_all_buffer_q = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda") # 这里的参数量后面再补充为可配置的
+        all_to_all_buffer_k = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
+        all_to_all_buffer_v = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
+        iris_all_to_all_buffers = [all_to_all_buffer_q,all_to_all_buffer_k,all_to_all_buffer_v]
     else:
         assert not (
             args.t5_fsdp or args.dit_fsdp
@@ -544,7 +546,7 @@ def generate(args):
             seed=args.base_seed,
             offload_model=args.offload_model,
             iris_shm_handle = shmem, # 单卡情况下无法运行,后面需要加上条件判断
-            iris_buffer_tensor = all_to_all_buffer)
+            iris_buffer_list = iris_all_to_all_buffers)
 
     if rank == 0:
         if args.save_file is None:
