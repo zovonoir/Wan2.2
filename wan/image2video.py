@@ -504,7 +504,10 @@ class WanI2V:
                 torch.cuda.empty_cache()
 
             if self.rank == 0:
-                videos = self.vae.decode(x0)
+                if int(os.environ.get('ENABLE_TORCH_PROFILER', '0')) != 0: # profiler enabled
+                    exit()
+                else:
+                    videos = self.vae.decode(x0)
 
         del noise, latent, x0
         del sample_scheduler
