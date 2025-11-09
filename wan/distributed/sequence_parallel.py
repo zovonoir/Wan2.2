@@ -186,16 +186,16 @@ def triton_all_to_all_4D_bf16_backward(data, # bf16
                     world_size:tl.constexpr,
                     iris_buffer,
                     heap_bases:tl.tensor):
-    token_id = tl.program_id(0)
+    pid = tl.program_id(0) # 当前这个block要把数据写到0-7号rank的这个token id的位置
     output_seq_len = seq_this_rank // world_size
     out_hn = in_hn * world_size
     for target_rank in tl.range(0,world_size):
         rank_stride = output_seq_len * target_rank
-        token_id += rank_stride
+        token_id = pid + rank_stride # 当前要写出的数据在本地视角下的token id
         local_rank_data_start_offsets = data + token_id * in_hn * hs + tl.arange(0,hs)
-        target_rank_data_start_offsets = iris_buffer + token_id * out_hn * hs + (local_rank * in_hn*hs) + tl.arange(0,hs)
+        target_rank_data_start_offsets = iris_buffer + pid * out_hn * hs + (local_rank * in_hn * hs) + tl.arange(0,hs)
         for head_idx in tl.range(0,in_hn):
-            local_ptrs = local_rank_data_start_offsets + head_idx * hs
+            local_ptrs = local_rank_data_start_offsets + (head_idx * hs)
             head_data = tl.load(local_ptrs,mask=None)
             remote_ptrs = target_rank_data_start_offsets + (head_idx * hs)
             # write to target rank
@@ -453,12 +453,12 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
         window_size=self.window_size,
     )
 
-    x = all_to_all(x, scatter_dim=1, gather_dim=2)
-    # triton_all_to_all_4D_bf16_backward[(sp_seq_len,1,1)](x,hs,hn//world_size,sp_seq_len*world_size,rank,world_size,iris_o,heap_bases)
-    x = x.flatten(2)
-    # shmem_handle.barrier()
+    # x = all_to_all(x, scatter_dim=1, gather_dim=2)
+    triton_all_to_all_4D_bf16_backward[(sp_seq_len,1,1)](x,hs,hn//world_size,sp_seq_len*world_size,rank,world_size,iris_o,heap_bases)
+    iris_o = iris_o.flatten(2)
+    shmem_handle.barrier()
  
-    x = self.o(x)
+    x = self.o(iris_o)
     return x
 
 def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
