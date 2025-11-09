@@ -457,7 +457,7 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
     triton_all_to_all_4D_bf16_backward[(sp_seq_len,1,1)](x,hs,hn//world_size,sp_seq_len*world_size,rank,world_size,iris_o,heap_bases)
     iris_o = iris_o.flatten(2)
     shmem_handle.barrier()
- 
+  
     x = self.o(iris_o)
     return x
 
