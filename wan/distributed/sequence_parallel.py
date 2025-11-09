@@ -321,9 +321,13 @@ def sp_dit_forward(
     x = self.unpatchify(x, grid_sizes)
     return [u.float() for u in x]
 
+stream_q = torch.cuda.Stream()
+stream_k = torch.cuda.Stream()
+stream_v = torch.cuda.Stream()
 
 def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16):
     assert isinstance(freqs_i,tuple)
+    global stream_q,stream_k,stream_v
     freqs_i,shmem_handle,iris_buffer_list = freqs_i
     iris_q,iris_k,iris_v = iris_buffer_list
 
@@ -380,21 +384,38 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
         world_size = get_world_size()
         heap_bases = shmem_handle.get_heap_bases()
         # q_alltoall_buffer = torch.empty([bs,sp_seq_len * world_size,hn//world_size,hs],dtype = dtype,device=x.device)
-        rope_triton_kernel_fp16_with_alltoall[(sp_seq_len,1,1)](q,freqs_i,hs,rank,sp_seq_len,hn, iris_q,world_size,heap_bases)
         # shmem_handle.barrier()
         # q = iris_q.clone() # iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
 
-        rope_triton_kernel_fp16_with_alltoall[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_k,world_size,heap_bases)
+        
         # shmem_handle.barrier()
         # k = iris_k.clone() #iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
         # v=half(v)
         # v=all_to_all(v,2,1)
-        triton_all_to_all_4D[(sp_seq_len,1,1)](v,hs,hn,sp_seq_len,rank,world_size,iris_v,heap_bases)
+
+        # 在不同的 stream 上执行三个 kernel
+        with torch.cuda.stream(stream_q):
+            rope_triton_kernel_fp16_with_alltoall[(sp_seq_len,1,1)](q,freqs_i,hs,rank,sp_seq_len,hn, iris_q,world_size,heap_bases)
+
+        with torch.cuda.stream(stream_k):
+            rope_triton_kernel_fp16_with_alltoall[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_k,world_size,heap_bases)
+
+        with torch.cuda.stream(stream_v):
+            triton_all_to_all_4D[(sp_seq_len,1,1)](v,hs,hn,sp_seq_len,rank,world_size,iris_v,heap_bases)
+
+        # rope_triton_kernel_fp16_with_alltoall[(sp_seq_len,1,1)](q,freqs_i,hs,rank,sp_seq_len,hn, iris_q,world_size,heap_bases)
+        # rope_triton_kernel_fp16_with_alltoall[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_k,world_size,heap_bases)
+        # triton_all_to_all_4D[(sp_seq_len,1,1)](v,hs,hn,sp_seq_len,rank,world_size,iris_v,heap_bases)
+        stream_q.synchronize()
+        stream_k.synchronize()
+        stream_v.synchronize()
+
         shmem_handle.barrier()
+
         q = iris_q.clone()
         k = iris_k.clone()
         v = iris_v.clone()
-        
+
 
     if False: # q执行alltoall kernel,k执行rope kernel
         bs = q.shape[0]
