@@ -510,3 +510,4 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
     x = x.flatten(2)
     x = self.o(x)
     return x
+ 
