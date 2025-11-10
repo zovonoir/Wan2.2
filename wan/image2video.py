@@ -421,7 +421,7 @@ class WanI2V:
                     activities=[torch.profiler.ProfilerActivity.CPU,torch.profiler.ProfilerActivity.CUDA],
                     record_shapes=False,
                     profile_memory=False,
-                    with_stack=False,
+                    with_stack=True,
                     with_flops=False
                 ) as prof:
                     for _, t in enumerate(tqdm(timesteps)):
