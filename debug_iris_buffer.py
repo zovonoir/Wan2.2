@@ -11,7 +11,7 @@ dist.init_process_group(
     rank=rank,
     init_method="tcp://127.0.0.1:29500")
 shmem = iris.iris(13640*40*128*2)
-all_to_all_iris = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
+iris_o = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
 
 import triton
 import triton.language as tl
@@ -261,6 +261,99 @@ def all_to_all_triton3(data, # bf16
                 mask = None
             )
 
+@triton.jit
+def triton_all_to_all_4D_bf16_backward1(data, # bf16
+                    hs:tl.constexpr,
+                    in_hn:tl.constexpr,
+                    seq_this_rank:tl.constexpr,
+                    local_rank:tl.constexpr,
+                    world_size:tl.constexpr,
+                    iris_buffer,
+                    heap_bases:tl.tensor):
+    pid = tl.program_id(0) # 当前这个block要把数据写到0-7号rank的这个token id的位置
+    output_seq_len = seq_this_rank // world_size
+    out_hn = in_hn * world_size
+    for target_rank in tl.range(0,world_size):
+        rank_stride = output_seq_len * target_rank
+        token_id = pid + rank_stride # 当前要写出的数据在本地视角下的token id
+        local_rank_data_start_offsets = data + token_id * in_hn * hs + tl.arange(0,hs)
+        target_rank_data_start_offsets = iris_buffer + pid * out_hn * hs + (local_rank * in_hn * hs) + tl.arange(0,hs)
+        for head_idx in tl.range(0,in_hn):
+            local_ptrs = local_rank_data_start_offsets + (head_idx * hs)
+            head_data = tl.load(local_ptrs,mask=None)
+            remote_ptrs = target_rank_data_start_offsets + (head_idx * hs)
+            # write to target rank
+            iris.store(
+                pointer = remote_ptrs,
+                value = head_data,
+                from_rank = local_rank,
+                to_rank = target_rank,
+                heap_bases = heap_bases,
+                mask = None
+            )
+
+@triton.jit
+def triton_all_to_all_4D_bf16_backward11(iris_input_buffer,
+                    hs:tl.constexpr,
+                    in_hn:tl.constexpr, # 5
+                    seq_this_rank:tl.constexpr, # 109120
+                    local_rank:tl.constexpr,
+                    world_size:tl.constexpr,
+                    local_output_bufer,
+                    heap_bases:tl.tensor):
+    pid = tl.program_id(0) # 当前这个block要把数据写到0-7号rank的这个token id的位置
+    output_seq_len = seq_this_rank // world_size
+    out_hn = in_hn * world_size
+    for target_rank in tl.range(0,world_size):
+        remote_data_start_offset = (local_rank * output_seq_len)*(in_hn * hs) + pid * (in_hn * hs)
+        local_output_start_offset = pid * out_hn * hs
+        for head_idx in tl.range(0,in_hn):
+            remote_ptrs = iris_input_buffer + remote_data_start_offset + head_idx * hs + tl.arange(0,hs)
+            head_data = iris.load(
+                pointer = remote_ptrs,
+                to_rank = local_rank,
+                from_rank = target_rank,
+                heap_bases = heap_bases,
+                mask = None
+            )
+            tl.store(
+                pointer=local_output_bufer + local_output_start_offset + target_rank * in_hn * hs + head_idx *hs + tl.arange(0,hs),
+                value = head_data,
+                mask = None
+            )
+
+
+@triton.jit
+def triton_all_to_all_4D_bf16_backward_reference(data, # bf16
+                    hs:tl.constexpr,
+                    in_hn:tl.constexpr,
+                    seq_this_rank:tl.constexpr,
+                    local_rank:tl.constexpr,
+                    world_size:tl.constexpr,
+                    iris_buffer,
+                    heap_bases:tl.tensor):
+    pid = tl.program_id(0) # 当前这个block要把数据写到0-7号rank的这个token id的位置
+    output_seq_len = seq_this_rank // world_size
+    out_hn = in_hn * world_size
+    for target_rank in tl.range(0,world_size):
+        rank_stride = output_seq_len * target_rank
+        token_id = pid + rank_stride # 当前要写出的数据在本地视角下的token id
+        local_rank_data_start_offsets = data + token_id * in_hn * hs + tl.arange(0,hs)
+        target_rank_data_start_offsets = iris_buffer + pid * out_hn * hs + (local_rank * in_hn * hs) + tl.arange(0,hs)
+        for head_idx in tl.range(0,in_hn):
+            local_ptrs = local_rank_data_start_offsets + (head_idx * hs)
+            head_data = tl.load(local_ptrs,mask=None)
+            remote_ptrs = target_rank_data_start_offsets + (head_idx * hs)
+            # write to target rank
+            iris.store(
+                pointer = remote_ptrs,
+                value = head_data,
+                from_rank = local_rank,
+                to_rank = target_rank,
+                heap_bases = heap_bases,
+                mask = None
+            )
+
 q = torch.load(f"rank_{rank}_before_rope_q.pt") # fp32
 k = torch.load(f"rank_{rank}_before_rope_k.pt")
 v = torch.load(f"rank_{rank}_before_rope_v.pt")
@@ -276,16 +369,30 @@ k_after_rope = torch.load(f"rank_{rank}_rope_half_output_before_alltoall_k.pt")
 v_after_rope = torch.load(f"rank_{rank}_rope_half_output_before_alltoall_v.pt")
 
 q_alltoall_reference = all_to_all(q_after_rope,scatter_dim=2,gather_dim=1)
-k_alltoall_reference = all_to_all(k_after_rope,scatter_dim=2,gather_dim=1)
+# shmem.barrier()
+# k_alltoall_reference = all_to_all(k_after_rope,scatter_dim=2,gather_dim=1)
+iris_o.copy_(q_alltoall_reference)
 
-q_empty = torch.empty_like(q_alltoall_reference)
+q_empty = torch.zeros_like(q_after_rope).to(iris_o.device)
 
-if True: # 测试 all to all结果
-    all_to_all_triton[(13640,1,1)](q_after_rope,128,40,13640,rank,8,all_to_all_iris,shmem.get_heap_bases())
-    shmem.barrier()
-    qq=all_to_all_iris.clone()
+
+# 测试 all to all backward结果
+# triton_all_to_all_4D_bf16_backward11[(13640,1,1)](iris_o,128,5,109120,rank,8,q_empty,shmem.get_heap_bases())
+# triton_all_to_all_4D_bf16_backward_reference[(13640,1,1)](q_alltoall_reference,128,5,109120,rank,8,iris_o,shmem.get_heap_bases())
+# shmem.barrier()
+# print(iris_o - q_after_rope)
+
+
+triton_all_to_all_4D_bf16_backward11[(13640,1,1)](iris_o,128,5,109120,rank,8,q_empty,shmem.get_heap_bases())
+# shmem.barrier()
+print((q_empty - q_after_rope).sum())
+
+# if True: # 测试 all to all结果
+#     all_to_all_triton[(13640,1,1)](q_after_rope,128,40,13640,rank,8,all_to_all_iris,shmem.get_heap_bases())
+#     shmem.barrier()
+#     qq=all_to_all_iris.clone()
     
-    print(f"rank {rank} SAME?  {1-torch.abs((qq - q_alltoall_reference)).sum().item()} \n")
+#     print(f"rank {rank} SAME?  {1-torch.abs((qq - q_alltoall_reference)).sum().item()} \n")
     # all_to_all_triton[(13640,1,1)](k_after_rope,128,40,13640,rank,8,all_to_all_iris,shmem.get_heap_bases())
     # kk = all_to_all_iris.clone()
     # print(f"rank {rank} SAME?  {1-torch.abs((kk - k_alltoall_reference)).sum().item()} \n")

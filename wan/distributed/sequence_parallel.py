@@ -179,7 +179,7 @@ def triton_all_to_all_4D_bf16_forward(data, # bf16
 
 
 @triton.jit
-def triton_all_to_all_4D_bf16_backward(data, # bf16
+def triton_all_to_all_4D_bf16_backward_deprecated(data, # bf16
                     hs:tl.constexpr,
                     in_hn:tl.constexpr,
                     seq_this_rank:tl.constexpr,
@@ -209,7 +209,37 @@ def triton_all_to_all_4D_bf16_backward(data, # bf16
                 mask = None
             )
             
-    
+
+@triton.jit
+def triton_all_to_all_4D_bf16_backward(iris_input_buffer,
+                    hs:tl.constexpr,
+                    in_hn:tl.constexpr, # 5
+                    seq_this_rank:tl.constexpr, # 109120
+                    local_rank:tl.constexpr,
+                    world_size:tl.constexpr,
+                    local_output_bufer,
+                    heap_bases:tl.tensor):
+    pid = tl.program_id(0)
+    output_seq_len = seq_this_rank // world_size
+    out_hn = in_hn * world_size
+    for target_rank in tl.range(0,world_size):
+        remote_data_start_offset = (local_rank * output_seq_len)*(in_hn * hs) + pid * (in_hn * hs)
+        local_output_start_offset = pid * out_hn * hs
+        for head_idx in tl.range(0,in_hn):
+            remote_ptrs = iris_input_buffer + remote_data_start_offset + head_idx * hs + tl.arange(0,hs)
+            head_data = iris.load(
+                pointer = remote_ptrs,
+                to_rank = local_rank,
+                from_rank = target_rank,
+                heap_bases = heap_bases,
+                mask = None
+            )
+            tl.store(
+                pointer=local_output_bufer + local_output_start_offset + target_rank * in_hn * hs + head_idx *hs + tl.arange(0,hs),
+                value = head_data,
+                mask = None
+            )
+
 
 def pad_freqs(original_tensor, target_len):
     seq_len, s1, s2 = original_tensor.shape
@@ -348,11 +378,11 @@ def sp_dit_forward(
     x = self.unpatchify(x, grid_sizes)
     return [u.float() for u in x]
 
-def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16):
+def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16):
     assert isinstance(freqs_i,tuple)
     global stream_q,stream_k,stream_v
     freqs_i,shmem_handle,iris_buffer_list = freqs_i
-    iris_q,iris_k,iris_v,iris_o = iris_buffer_list
+    iris_q,iris_k,iris_v,iris_o,attn_buffer = iris_buffer_list
 
     b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
     half_dtypes = (torch.float16, torch.bfloat16)
@@ -368,103 +398,44 @@ def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat1
         return q, k, v
 
     q, k, v = qkv_fn(x)
-    
-    if False:
-        q = rope_apply(q, grid_sizes, freqs)
-        k = rope_apply(k, grid_sizes, freqs)
 
-        x = distributed_attention(
-            half(q),
-            half(k),
-            half(v),
-            seq_lens,
-            window_size=self.window_size,
-        )
-
-        q = all_to_all(q, scatter_dim=2, gather_dim=1)
-        k = all_to_all(k, scatter_dim=2, gather_dim=1)
-        v = all_to_all(v, scatter_dim=2, gather_dim=1)
-
-
-    if False: # 这一段被证明是完全有效的
-        q_buffer = half(torch.empty_like(q))
-        k_buffer = half(torch.empty_like(k))
-        rope_triton_kernel_fp16[(sp_seq_len,1,1)](q,freqs_i,q_buffer,hs,rank,sp_seq_len,hn)
-        rope_triton_kernel_fp16[(sp_seq_len,1,1)](k,freqs_i,k_buffer,hs,rank,sp_seq_len,hn)
-        q=q_buffer
-        k=k_buffer
-        v=half(v)
-        q = all_to_all(q, scatter_dim=2, gather_dim=1)
-        k = all_to_all(k, scatter_dim=2, gather_dim=1)
-        v = all_to_all(v, scatter_dim=2, gather_dim=1)
-
-    if True: # 但是这一段带上alltoall的功能就失效
-        bs = q.shape[0]
-        hs = q.shape[-1]
-        rank = get_rank()
-        sp_seq_len = q.shape[1]
-        hn = q.shape[2]
-        world_size = get_world_size()
-        heap_bases = shmem_handle.get_heap_bases()
-        # q_alltoall_buffer = torch.empty([bs,sp_seq_len * world_size,hn//world_size,hs],dtype = dtype,device=x.device)
-        # shmem_handle.barrier()
-        # q = iris_q.clone() # iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
-
-        
-        # shmem_handle.barrier()
-        # k = iris_k.clone() #iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
-        # v=half(v)
-        # v=all_to_all(v,2,1)
-
-        rope_triton_kernel_bf16_alltoall_4D[(sp_seq_len,1,1)](q,freqs_i,hs,rank,sp_seq_len,hn, iris_q,world_size,heap_bases)
-        rope_triton_kernel_bf16_alltoall_4D[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_k,world_size,heap_bases)
-        triton_all_to_all_4D_bf16_forward[(sp_seq_len,1,1)](v,hs,hn,sp_seq_len,rank,world_size,iris_v,heap_bases)
-        shmem_handle.barrier()
-        # torch.cuda.synchronize()
-        # dist.barrier()
-
-        q = iris_q
-        k = iris_k
-        v = iris_v
-
-
-    if False: # q执行alltoall kernel,k执行rope kernel
-        bs = q.shape[0]
-        hs = q.shape[-1]
-        rank = get_rank()
-        sp_seq_len = q.shape[1]
-        hn = q.shape[2]
-        world_size = get_world_size()
-        heap_bases = shmem_handle.get_heap_bases()
-        q_alltoall_buffer = torch.empty([bs,sp_seq_len * world_size,hn//world_size,hs],dtype = dtype,device=x.device)
-        rope_triton_kernel_bf16_alltoall_4D[(sp_seq_len,1,1)](q,freqs_i,hs,rank,sp_seq_len,hn, iris_buffer_tensor,world_size,heap_bases)
-        q = q_alltoall_buffer.copy_(iris_buffer_tensor) # iris_buffer_tensor.clone().reshape([bs,world_size*sp_seq_len,hn // world_size,hs])
-
-        k_buffer = half(torch.empty_like(k))
-        rope_triton_kernel_fp16[(sp_seq_len,1,1)](k,freqs_i,k_buffer,hs,rank,sp_seq_len,hn)
-        k=k_buffer
-        k = all_to_all(k, scatter_dim=2, gather_dim=1)
-
-        v=half(v)
-        v = all_to_all(v, scatter_dim=2, gather_dim=1)
-
-    x = flash_attention(
-        q,
-        k,
-        v,
-        k_lens=seq_lens,
-        window_size=self.window_size,
-    )
-
-    # x = all_to_all(x, scatter_dim=1, gather_dim=2)
-    triton_all_to_all_4D_bf16_backward[(sp_seq_len,1,1)](x,hs,hn//world_size,sp_seq_len*world_size,rank,world_size,iris_o,heap_bases)
-    iris_o = iris_o.flatten(2)
+    bs = q.shape[0]
+    hs = q.shape[-1]
+    rank = get_rank()
+    sp_seq_len = q.shape[1]
+    hn = q.shape[2]
+    world_size = get_world_size()
+    heap_bases = shmem_handle.get_heap_bases()
+    rope_triton_kernel_bf16_alltoall_4D[(sp_seq_len,1,1)](q,freqs_i,hs,rank,sp_seq_len,hn, iris_q,world_size,heap_bases)
+    rope_triton_kernel_bf16_alltoall_4D[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_k,world_size,heap_bases)
+    triton_all_to_all_4D_bf16_forward[(sp_seq_len,1,1)](v,hs,hn,sp_seq_len,rank,world_size,iris_v,heap_bases)
     shmem_handle.barrier()
 
-    x = self.o(iris_o)
+    q = iris_q
+    k = iris_k
+    v = iris_v
+
+    iris_o.copy_(
+        flash_attention(
+            q,
+            k,
+            v,
+            k_lens=seq_lens,
+            window_size=self.window_size,
+        )
+    )
+    x = attn_buffer
+
+    # x = all_to_all(x, scatter_dim=1, gather_dim=2)
+    # triton_all_to_all_4D_bf16_backward[(sp_seq_len,1,1)](x,hs,hn//world_size,sp_seq_len*world_size,rank,world_size,iris_o,heap_bases)
+    triton_all_to_all_4D_bf16_backward[(sp_seq_len,1,1)](iris_o,hs,hn//world_size,sp_seq_len*world_size,rank,world_size,x,heap_bases)
+    # iris_o = iris_o.flatten(2)
+    # shmem_handle.barrier()
+    x = x.flatten(2)
+    x = self.o(x)
     return x
 
-def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
+def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
     b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
     half_dtypes = (torch.float16, torch.bfloat16)
 
