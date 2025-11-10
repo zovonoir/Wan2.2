@@ -10,6 +10,7 @@ import triton.language as tl
 import iris
 from ..modules.attention import flash_attention
 from .util import all_to_all
+import torch.distributed as dist
 
 @triton.jit
 def rope_triton_kernel_fp16(qk_ptr, freqs_ptr, 
@@ -347,7 +348,7 @@ def sp_dit_forward(
     x = self.unpatchify(x, grid_sizes)
     return [u.float() for u in x]
 
-def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16):
+def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16):
     assert isinstance(freqs_i,tuple)
     global stream_q,stream_k,stream_v
     freqs_i,shmem_handle,iris_buffer_list = freqs_i
@@ -419,6 +420,8 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
         rope_triton_kernel_bf16_alltoall_4D[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_k,world_size,heap_bases)
         triton_all_to_all_4D_bf16_forward[(sp_seq_len,1,1)](v,hs,hn,sp_seq_len,rank,world_size,iris_v,heap_bases)
         shmem_handle.barrier()
+        # torch.cuda.synchronize()
+        # dist.barrier()
 
         q = iris_q
         k = iris_k
@@ -461,7 +464,7 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
     x = self.o(iris_o)
     return x
 
-def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
+def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
     b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
     half_dtypes = (torch.float16, torch.bfloat16)
 
