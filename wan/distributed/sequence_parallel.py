@@ -196,7 +196,7 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
         )
     )
     x = attn_buffer
-
+ 
     # x = all_to_all(x, scatter_dim=1, gather_dim=2)
     # triton_all_to_all_4D_bf16_backward[(sp_seq_len,1,1)](x,hs,hn//world_size,sp_seq_len*world_size,rank,world_size,iris_o,heap_bases)
     triton_all_to_all_4D_bf16_backward[(sp_seq_len,1,1)](iris_o,hs,hn//world_size,sp_seq_len*world_size,rank,world_size,x,heap_bases)
