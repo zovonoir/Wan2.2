@@ -292,6 +292,38 @@ def triton_all_to_all_4D_bf16_backward1(data, # bf16
                 mask = None
             )
 
+
+@triton.jit
+def triton_all_to_all_4D_bf16_backward_reference(data, # bf16
+                    hs:tl.constexpr,
+                    in_hn:tl.constexpr,
+                    seq_this_rank:tl.constexpr,
+                    local_rank:tl.constexpr,
+                    world_size:tl.constexpr,
+                    iris_buffer,
+                    heap_bases:tl.tensor):
+    pid = tl.program_id(0) # 当前这个block要把数据写到0-7号rank的这个token id的位置
+    output_seq_len = seq_this_rank // world_size
+    out_hn = in_hn * world_size
+    for target_rank in tl.range(0,world_size):
+        rank_stride = output_seq_len * target_rank
+        token_id = pid + rank_stride # 当前要写出的数据在本地视角下的token id
+        local_rank_data_start_offsets = data + token_id * in_hn * hs + tl.arange(0,hs)
+        target_rank_data_start_offsets = iris_buffer + pid * out_hn * hs + (local_rank * in_hn * hs) + tl.arange(0,hs)
+        for head_idx in tl.range(0,in_hn):
+            local_ptrs = local_rank_data_start_offsets + (head_idx * hs)
+            head_data = tl.load(local_ptrs,mask=None)
+            remote_ptrs = target_rank_data_start_offsets + (head_idx * hs)
+            # write to target rank
+            iris.store(
+                pointer = remote_ptrs,
+                value = head_data,
+                from_rank = local_rank,
+                to_rank = target_rank,
+                heap_bases = heap_bases,
+                mask = None
+            )
+
 @triton.jit
 def triton_all_to_all_4D_bf16_backward11(iris_input_buffer,
                     hs:tl.constexpr,
@@ -324,35 +356,16 @@ def triton_all_to_all_4D_bf16_backward11(iris_input_buffer,
 
 
 @triton.jit
-def triton_all_to_all_4D_bf16_backward_reference(data, # bf16
+def triton_all_to_all_4D_no_sync(iris_input_buffer, # bf16
                     hs:tl.constexpr,
                     in_hn:tl.constexpr,
                     seq_this_rank:tl.constexpr,
                     local_rank:tl.constexpr,
                     world_size:tl.constexpr,
-                    iris_buffer,
+                    local_output_buffer,
                     heap_bases:tl.tensor):
-    pid = tl.program_id(0) # 当前这个block要把数据写到0-7号rank的这个token id的位置
-    output_seq_len = seq_this_rank // world_size
-    out_hn = in_hn * world_size
-    for target_rank in tl.range(0,world_size):
-        rank_stride = output_seq_len * target_rank
-        token_id = pid + rank_stride # 当前要写出的数据在本地视角下的token id
-        local_rank_data_start_offsets = data + token_id * in_hn * hs + tl.arange(0,hs)
-        target_rank_data_start_offsets = iris_buffer + pid * out_hn * hs + (local_rank * in_hn * hs) + tl.arange(0,hs)
-        for head_idx in tl.range(0,in_hn):
-            local_ptrs = local_rank_data_start_offsets + (head_idx * hs)
-            head_data = tl.load(local_ptrs,mask=None)
-            remote_ptrs = target_rank_data_start_offsets + (head_idx * hs)
-            # write to target rank
-            iris.store(
-                pointer = remote_ptrs,
-                value = head_data,
-                from_rank = local_rank,
-                to_rank = target_rank,
-                heap_bases = heap_bases,
-                mask = None
-            )
+    pid = tl.program_id(0)
+    
 
 q = torch.load(f"rank_{rank}_before_rope_q.pt") # fp32
 k = torch.load(f"rank_{rank}_before_rope_k.pt")
