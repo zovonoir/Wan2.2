@@ -419,7 +419,7 @@ class WanI2V:
             if int(os.environ.get('ENABLE_TORCH_PROFILER', '0')) != 0: # enable profiler
                 with torch.profiler.profile(
                     activities=[torch.profiler.ProfilerActivity.CPU,torch.profiler.ProfilerActivity.CUDA],
-                    record_shapes=False,
+                    record_shapes=True,
                     profile_memory=False,
                     with_stack=True,
                     with_flops=False
