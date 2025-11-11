@@ -91,7 +91,7 @@ docker exec zov_wan2.2_rope_alltoall_fusion_test git -C /app/Wan2.2 pull
 start_monitor
 
 # ============= 模型运行阶段 =============
-sudo rocm-smi --setperfdeterminism 1000
+sudo rocm-smi --setperfdeterminism 1500
 docker exec -e ENABLE_TORCH_PROFILER=1 zov_wan2.2_rope_alltoall_fusion_test bash /app/Wan2.2/tests/i2v.sh
 
 # ============= 模型运行后停止监控 =============
