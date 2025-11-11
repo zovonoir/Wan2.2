@@ -505,6 +505,7 @@ class WanI2V:
 
             if self.rank == 0:
                 if int(os.environ.get('ENABLE_TORCH_PROFILER', '0')) != 0: # profiler enabled
+                    assert 0,"profiler terminated"
                     exit()
                 else:
                     videos = self.vae.decode(x0)
