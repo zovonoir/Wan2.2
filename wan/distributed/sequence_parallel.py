@@ -183,7 +183,7 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
     q = iris_q
     k = iris_k
     v = iris_v
-
+    print(f"rank {rank}: {q.shape = },{k.shape = },{v.shape = },{seq_lens = },{self.window_size = }\n")
     iris_o.copy_(
         flash_attention(
             q,
