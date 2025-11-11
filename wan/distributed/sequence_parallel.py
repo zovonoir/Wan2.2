@@ -180,9 +180,9 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
     triton_all_to_all_4D_bf16_forward[(sp_seq_len,1,1)](v,hs,hn,sp_seq_len,rank,world_size,iris_v,heap_bases)
     shmem_handle.barrier()
 
-    q = torch.empty_like([bs,sp_seq_len*world_size,hn//world_size,hs],dtype=iris_q.dtype,device=iris_q.device).copy_(iris_q)
-    k = torch.empty_like([bs,sp_seq_len*world_size,hn//world_size,hs],dtype=iris_q.dtype,device=iris_q.device).copy_(iris_k)
-    v = torch.empty_like([bs,sp_seq_len*world_size,hn//world_size,hs],dtype=iris_q.dtype,device=iris_q.device).copy_(iris_v)
+    q = torch.empty([bs,sp_seq_len*world_size,hn//world_size,hs],dtype=iris_q.dtype,device=iris_q.device).copy_(iris_q)
+    k = torch.empty([bs,sp_seq_len*world_size,hn//world_size,hs],dtype=iris_q.dtype,device=iris_q.device).copy_(iris_k)
+    v = torch.empty([bs,sp_seq_len*world_size,hn//world_size,hs],dtype=iris_q.dtype,device=iris_q.device).copy_(iris_v)
     shmem_handle.barrier()
     # print(f"rank {rank}: {q.shape = },{k.shape = },{v.shape = },{seq_lens = },{self.window_size = }\n")
     iris_o.copy_(
