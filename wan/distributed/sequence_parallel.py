@@ -206,20 +206,12 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
         hn = q.shape[2]
         world_size = get_world_size()
         heap_bases = shmem_handle.get_heap_bases()
-  
-        rope_triton_kernel_bf16_alltoall_4D[(sp_seq_len,1,1)](q,freqs_i,hs,rank,sp_seq_len,hn, iris_q,world_size,heap_bases)
-        rope_triton_kernel_bf16_alltoall_4D[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_k,world_size,heap_bases)
-        triton_all_to_all_4D_bf16_forward[(sp_seq_len,1,1)](v,hs,hn,sp_seq_len,rank,world_size,iris_v,heap_bases)
-        shmem_handle.barrier()
 
-        # x = flash_attention(
-        #     iris_q,
-        #     iris_k,
-        #     iris_v,
-        #     k_lens=seq_lens,
-        #     window_size=self.window_size,
-        # )
-        # x = all_to_all(x, scatter_dim=1, gather_dim=2)
+        # KERNEL命名不合适,需要改名
+        rope_alltoall_4D_bf16_forward[(sp_seq_len,1,1)](q,freqs_i,hs,rank,sp_seq_len,hn, iris_q,world_size,heap_bases)
+        rope_alltoall_4D_bf16_forward[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_k,world_size,heap_bases)
+        all_to_all_4D_bf16_forward[(sp_seq_len,1,1)](v,hs,hn,sp_seq_len,rank,world_size,iris_v,heap_bases)
+        shmem_handle.barrier()
 
         iris_o.copy_(
             flash_attention(
@@ -231,12 +223,10 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
             )
         )
 
-        x = attn_buffer
         shmem_handle.barrier()
-        triton_all_to_all_4D_bf16_backward[(sp_seq_len,1,1)](iris_o,hs,hn//world_size,sp_seq_len*world_size,rank,world_size,x,heap_bases)
-        # 
+        all_to_all_4D_bf16_backward[(sp_seq_len,1,1)](iris_o,hs,hn//world_size,sp_seq_len*world_size,rank,world_size,attn_buffer,heap_bases)
 
         # output
-        x = x.flatten(2)
+        x = attn_buffer.flatten(2)
         x = self.o(x)
         return x

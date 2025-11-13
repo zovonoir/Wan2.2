@@ -52,7 +52,7 @@ def rope_triton_kernel_fp16(qk_ptr, freqs_ptr,
         tl.store(output_ptr_block + head_idx * PROG_SIZE,complex_output_bf16,mask=output_mask)
 
 @triton.jit
-def rope_triton_kernel_bf16_alltoall_4D(qk_ptr, freqs_ptr,
+def rope_alltoall_4D_bf16_forward(qk_ptr, freqs_ptr,
                     hs:tl.constexpr,# head size
                     local_rank:tl.constexpr, # [0-7]
                     seq_len_per_rank:tl.constexpr, # 13640
@@ -110,7 +110,7 @@ def rope_triton_kernel_bf16_alltoall_4D(qk_ptr, freqs_ptr,
             )
 
 @triton.jit
-def triton_all_to_all_4D_bf16_forward(data, # bf16
+def all_to_all_4D_bf16_forward(data, # bf16
         hs:tl.constexpr,
         in_hn:tl.constexpr,
         seq_len_per_rank:tl.constexpr,
@@ -176,7 +176,7 @@ def triton_all_to_all_4D_bf16_backward_deprecated(data, # bf16
             
 
 @triton.jit
-def triton_all_to_all_4D_bf16_backward(iris_input_buffer,
+def all_to_all_4D_bf16_backward(iris_input_buffer,
                     hs:tl.constexpr,
                     in_hn:tl.constexpr, # 5
                     seq_this_rank:tl.constexpr, # 109120

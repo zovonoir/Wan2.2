@@ -1,5 +1,6 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import torch
+import aiter
 
 try:
     import flash_attn_interface
@@ -110,7 +111,8 @@ def flash_attention(
             deterministic=deterministic)[0].unflatten(0, (b, lq))
     else:
         assert FLASH_ATTN_2_AVAILABLE
-        x = flash_attn.flash_attn_varlen_func(
+        # x = flash_attn.flash_attn_varlen_func(
+        x = aiter.ops.mha.flash_attn_varlen_func(
             q=q,
             k=k,
             v=v,
