@@ -331,17 +331,6 @@ def generate(args):
             rank=rank,
             world_size=world_size)
 
-        # shmem = iris.iris(1024*1024*1024*4) # 4G
-        # all_to_all_buffer_q = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda") # 这里的参数量后面再补充为可配置的
-        # all_to_all_buffer_k = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
-        # all_to_all_buffer_v = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
-        # all_to_all_buffer_o = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
-        # attn_buffer = shmem.zeros([1,13640,40,128],dtype=torch.bfloat16,device="cuda")
-        # streamq = torch.cuda.Stream(device = f"cuda:{local_rank}")
-        # streamk = torch.cuda.Stream(device = f"cuda:{local_rank}")
-        # streamv = torch.cuda.Stream(device = f"cuda:{local_rank}")
-        # iris_all_to_all_buffers = [all_to_all_buffer_q,all_to_all_buffer_k,all_to_all_buffer_v,all_to_all_buffer_o,attn_buffer,streamq,streamk,streamv]
-
         # pre-compute image size,for buffer allocation, optimize for all to all using iris
         import torchvision.transforms.functional as TF
         import numpy as np
@@ -363,12 +352,10 @@ def generate(args):
         all_to_all_buffer_v = shmem.zeros([1,max_seq_len,cfg_temp.num_heads//world_size,128],dtype=torch.bfloat16,device="cuda")
         all_to_all_buffer_o = shmem.zeros([1,max_seq_len,cfg_temp.num_heads//world_size,128],dtype=torch.bfloat16,device="cuda")
         attn_buffer = shmem.zeros([1,max_seq_len // world_size,cfg_temp.num_heads,128],dtype=torch.bfloat16,device="cuda")
-        streamq = torch.cuda.Stream(device = f"cuda:{local_rank}")
-        streamk = torch.cuda.Stream(device = f"cuda:{local_rank}")
-        streamv = torch.cuda.Stream(device = f"cuda:{local_rank}")
+        # streamq = torch.cuda.Stream(device = f"cuda:{local_rank}")
+        # streamk = torch.cuda.Stream(device = f"cuda:{local_rank}")
+        # streamv = torch.cuda.Stream(device = f"cuda:{local_rank}")
         iris_all_to_all_buffers = [all_to_all_buffer_q,all_to_all_buffer_k,all_to_all_buffer_v,all_to_all_buffer_o,attn_buffer,streamq,streamk,streamv]
-
-
 
     else:
         assert not (

@@ -181,7 +181,8 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
         assert isinstance(freqs_i,tuple)
         global stream_q,stream_k,stream_v
         freqs_i,shmem_handle,iris_buffer_list = freqs_i
-        iris_q,iris_k,iris_v,iris_o,attn_buffer,streamq,streamk,streamv = iris_buffer_list
+        # iris_q,iris_k,iris_v,iris_o,attn_buffer,streamq,streamk,streamv = iris_buffer_list
+        iris_q,iris_k,iris_v,iris_o,attn_buffer = iris_buffer_list
 
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
         half_dtypes = (torch.float16, torch.bfloat16)
