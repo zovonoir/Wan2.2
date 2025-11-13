@@ -13,9 +13,7 @@ import random
 import torch
 import torch.distributed as dist
 from PIL import Image
-import iris
-import numpy as np
-import math
+
 import wan
 from wan.configs import MAX_AREA_CONFIGS, SIZE_CONFIGS, SUPPORTED_SIZES, WAN_CONFIGS
 from wan.distributed.util import init_distributed_group
@@ -332,35 +330,6 @@ def generate(args):
             init_method="env://",
             rank=rank,
             world_size=world_size)
-        # pre-compute image size,for buffer allocation, optimize for all to all using iris
-        # import torchvision.transforms.functional as TF
-        # h, w = TF.to_tensor(Image.open(args.image).convert("RGB")).sub_(0.5).div_(0.5).to("cpu").shape[1:]
-        # aspect_ratio = h / w
-        # max_area = int(eval(args.size))
-        # cfg_temp = WAN_CONFIGS[args.task]
-        # lat_h = round(np.sqrt(max_area * aspect_ratio) // cfg_temp.vae_stride[1] // cfg_temp.patch_size[1] * cfg_temp.patch_size[1])
-        # lat_w = round(np.sqrt(max_area / aspect_ratio) // cfg_temp.vae_stride[2] // cfg_temp.patch_size[2] * cfg_temp.patch_size[2])
-        # h = lat_h * cfg_temp.vae_stride[1]
-        # w = lat_w * cfg_temp.vae_stride[2]
-        # max_seq_len = ((int(args.frame_num) - 1) // cfg_temp.vae_stride[0] + 1) * lat_h * lat_w // (cfg_temp.patch_size[1] * cfg_temp.patch_size[2])
-        # max_seq_len = int(math.ceil(max_seq_len / world_size)) * world_size
-
-        # shmem = iris.iris(1024*1024*1024*1) # 1GB 
-        # all_to_all_buffer_q = shmem.zeros([1,max_seq_len,cfg_temp.num_heads//world_size,128],dtype=torch.bfloat16,device="cuda") # 这里的参数量后面再补充为可配置的
-        # all_to_all_buffer_k = shmem.zeros([1,max_seq_len,cfg_temp.num_heads//world_size,128],dtype=torch.bfloat16,device="cuda")
-        # all_to_all_buffer_v = shmem.zeros([1,max_seq_len,cfg_temp.num_heads//world_size,128],dtype=torch.bfloat16,device="cuda")
-        # all_to_all_buffer_o = shmem.zeros([1,max_seq_len,cfg_temp.num_heads//world_size,128],dtype=torch.bfloat16,device="cuda")
-        # attn_buffer = shmem.zeros([1,max_seq_len // world_size,cfg_temp.num_heads,128],dtype=torch.bfloat16,device="cuda")
-        # iris_all_to_all_buffers = [all_to_all_buffer_q,all_to_all_buffer_k,all_to_all_buffer_v,all_to_all_buffer_o,attn_buffer]
-
-        shmem = iris.iris(1024*1024*1024*4) # 4G
-        all_to_all_buffer_q = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda") # 这里的参数量后面再补充为可配置的
-        all_to_all_buffer_k = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
-        all_to_all_buffer_v = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
-        all_to_all_buffer_o = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
-        attn_buffer = shmem.zeros([1,13640,40,128],dtype=torch.bfloat16,device="cuda")
-        iris_all_to_all_buffers = [all_to_all_buffer_q,all_to_all_buffer_k,all_to_all_buffer_v,all_to_all_buffer_o,attn_buffer]
-
     else:
         assert not (
             args.t5_fsdp or args.dit_fsdp
@@ -568,9 +537,7 @@ def generate(args):
             sampling_steps=args.sample_steps,
             guide_scale=args.sample_guide_scale,
             seed=args.base_seed,
-            offload_model=args.offload_model,
-            iris_shm_handle = shmem, # 单卡情况下无法运行,后面需要加上条件判断
-            iris_buffer_list = iris_all_to_all_buffers)
+            offload_model=args.offload_model)
 
     if rank == 0:
         if args.save_file is None:

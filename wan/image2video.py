@@ -125,31 +125,6 @@ class WanI2V:
 
         self.sample_neg_prompt = config.sample_neg_prompt
 
-    def calculate_grid_sizes(self, noise,y):
-        noise_shape = noise.shape
-        y_shape = y.shape
-        device = noise.device
-        latent_shape = (1,noise_shape[0]+y_shape[0], noise_shape[1], noise_shape[2], noise_shape[3])
-        conv_out_channels = self.low_noise_model.patch_embedding.out_channels
-        conv_stride = self.low_noise_model.patch_embedding.stride
-        conv_out_shape = (1,conv_out_channels,latent_shape[2] // conv_stride[0] ,latent_shape[3] //conv_stride[1],latent_shape[4] // conv_stride[2])
-        grid_sizes = torch.stack([torch.tensor(conv_out_shape[2:], dtype=torch.long,device=device)])
-        return grid_sizes
-
-    def calculate_freqs_i(self,grid_sizes):
-        f,h,w = grid_sizes.tolist()[0]
-        seq_len = f * h * w
-        c=64 # 将这里改成可配置的不要写死
-        freqs = self.low_noise_model.freqs.clone().split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
-        freqs_i = torch.cat([
-            freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
-            freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-            freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
-        ],dim=-1).reshape(seq_len, 1, -1)
-        real_freqs_i = torch.view_as_real(freqs_i).to(self.device)
-        return real_freqs_i
-
-
     def _configure_model(self, model, use_sp, dit_fsdp, shard_fn,
                          convert_model_dtype):
         """
@@ -239,9 +214,7 @@ class WanI2V:
                  guide_scale=5.0,
                  n_prompt="",
                  seed=-1,
-                 offload_model=True,
-                 iris_shm_handle = None,
-                 iris_buffer_list = None):
+                 offload_model=True):
         r"""
         Generates video frames from input image and text prompt using diffusion process.
 
@@ -280,7 +253,6 @@ class WanI2V:
                 - H: Frame height (from max_area)
                 - W: Frame width from max_area)
         """
-        assert ((iris_shm_handle is not None) and (iris_buffer_list is not None)) or ((iris_shm_handle is None) and (iris_buffer_list is None))
         # preprocess
         guide_scale = (guide_scale, guide_scale) if isinstance(
             guide_scale, float) else guide_scale
@@ -391,16 +363,7 @@ class WanI2V:
 
             # sample videos
             latent = noise
-            grid_sizes=self.calculate_grid_sizes(latent,y) # grid_sizes唯一作用就是辅助计算出real_freq_i,在这之后可以弃用
-            real_freq_i=self.calculate_freqs_i(grid_sizes)
 
-            self.high_noise_model.freqs_i= real_freq_i
-            self.high_noise_model.shmem_handle = iris_shm_handle
-            self.high_noise_model.iris_buffer_list = iris_buffer_list
-            self.low_noise_model.freqs_i= real_freq_i
-            self.low_noise_model.shmem_handle = iris_shm_handle
-            self.low_noise_model.iris_buffer_list = iris_buffer_list
-            
             arg_c = {
                 'context': [context[0]],
                 'seq_len': max_seq_len,
@@ -416,87 +379,38 @@ class WanI2V:
             if offload_model:
                 torch.cuda.empty_cache()
 
-            if int(os.environ.get('ENABLE_TORCH_PROFILER', '0')) != 0: # enable profiler
-                with torch.profiler.profile(
-                    activities=[torch.profiler.ProfilerActivity.CPU,torch.profiler.ProfilerActivity.CUDA],
-                    record_shapes=True,
-                    profile_memory=False,
-                    with_stack=True,
-                    with_flops=False
-                ) as prof:
-                    for _, t in enumerate(tqdm(timesteps)):
-                        if _ > 3:
-                            break
-                        with torch.profiler.record_function(f"step_{_}_rank_{self.rank}"):
-                            latent_model_input = [latent.to(self.device)]
-                            timestep = [t]
+            for _, t in enumerate(tqdm(timesteps)):
+                latent_model_input = [latent.to(self.device)]
+                timestep = [t]
 
-                            timestep = torch.stack(timestep).to(self.device)
+                timestep = torch.stack(timestep).to(self.device)
 
-                            model = self._prepare_model_for_timestep(
-                                t, boundary, offload_model)
-                            sample_guide_scale = guide_scale[1] if t.item(
-                            ) >= boundary else guide_scale[0]
+                model = self._prepare_model_for_timestep(
+                    t, boundary, offload_model)
+                sample_guide_scale = guide_scale[1] if t.item(
+                ) >= boundary else guide_scale[0]
 
-                            noise_pred_cond = model(
-                                latent_model_input, t=timestep, **arg_c)[0]
-                            if offload_model:
-                                torch.cuda.empty_cache()
-                            noise_pred_uncond = model(
-                                latent_model_input, t=timestep, **arg_null)[0]
-                            if offload_model:
-                                torch.cuda.empty_cache()
-                            noise_pred = noise_pred_uncond + sample_guide_scale * (
-                                noise_pred_cond - noise_pred_uncond)
+                noise_pred_cond = model(
+                    latent_model_input, t=timestep, **arg_c)[0]
+                if offload_model:
+                    torch.cuda.empty_cache()
+                noise_pred_uncond = model(
+                    latent_model_input, t=timestep, **arg_null)[0]
+                if offload_model:
+                    torch.cuda.empty_cache()
+                noise_pred = noise_pred_uncond + sample_guide_scale * (
+                    noise_pred_cond - noise_pred_uncond)
 
-                            temp_x0 = sample_scheduler.step(
-                                noise_pred.unsqueeze(0),
-                                t,
-                                latent.unsqueeze(0),
-                                return_dict=False,
-                                generator=seed_g)[0]
-                            latent = temp_x0.squeeze(0)
+                temp_x0 = sample_scheduler.step(
+                    noise_pred.unsqueeze(0),
+                    t,
+                    latent.unsqueeze(0),
+                    return_dict=False,
+                    generator=seed_g)[0]
+                latent = temp_x0.squeeze(0)
 
-                            x0 = [latent]
-                            del latent_model_input, timestep
-
-                trace_path = f"trace_rank{self.rank}.json"
-                prof.export_chrome_trace(trace_path)
-                print(f"[rank{self.rank}] trace saved to {trace_path}")
-
-            else: # profiler off
-                for _, t in enumerate(tqdm(timesteps)):
-                    latent_model_input = [latent.to(self.device)]
-                    timestep = [t]
-
-                    timestep = torch.stack(timestep).to(self.device)
-
-                    model = self._prepare_model_for_timestep(
-                        t, boundary, offload_model)
-                    sample_guide_scale = guide_scale[1] if t.item(
-                    ) >= boundary else guide_scale[0]
-
-                    noise_pred_cond = model(
-                        latent_model_input, t=timestep, **arg_c)[0]
-                    if offload_model:
-                        torch.cuda.empty_cache()
-                    noise_pred_uncond = model(
-                        latent_model_input, t=timestep, **arg_null)[0]
-                    if offload_model:
-                        torch.cuda.empty_cache()
-                    noise_pred = noise_pred_uncond + sample_guide_scale * (
-                        noise_pred_cond - noise_pred_uncond)
-
-                    temp_x0 = sample_scheduler.step(
-                        noise_pred.unsqueeze(0),
-                        t,
-                        latent.unsqueeze(0),
-                        return_dict=False,
-                        generator=seed_g)[0]
-                    latent = temp_x0.squeeze(0)
-
-                    x0 = [latent]
-                    del latent_model_input, timestep
+                x0 = [latent]
+                del latent_model_input, timestep
 
             if offload_model:
                 self.low_noise_model.cpu()
@@ -504,11 +418,7 @@ class WanI2V:
                 torch.cuda.empty_cache()
 
             if self.rank == 0:
-                if int(os.environ.get('ENABLE_TORCH_PROFILER', '0')) != 0: # profiler enabled
-                    assert 0,"profiler terminated"
-                    exit()
-                else:
-                    videos = self.vae.decode(x0)
+                videos = self.vae.decode(x0)
 
         del noise, latent, x0
         del sample_scheduler
@@ -519,4 +429,3 @@ class WanI2V:
             dist.barrier()
 
         return videos[0] if self.rank == 0 else None
-

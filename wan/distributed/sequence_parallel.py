@@ -5,10 +5,7 @@ import torch.cuda.amp as amp
 from ..modules.model import sinusoidal_embedding_1d
 from .ulysses import distributed_attention
 from .util import gather_forward, get_rank, get_world_size
-from .triton_kernels import *
-from ..modules.attention import flash_attention
-from .util import all_to_all
-import torch.distributed as dist
+
 
 def pad_freqs(original_tensor, target_len):
     seq_len, s1, s2 = original_tensor.shape
@@ -53,7 +50,6 @@ def rope_apply(x, grid_sizes, freqs):
         sp_size = get_world_size()
         sp_rank = get_rank()
         freqs_i = pad_freqs(freqs_i, s * sp_size)
-        # torch.save(freqs_i,f"rank_{get_rank()}_freqs_i.pt")
         s_per_rank = s
         freqs_i_rank = freqs_i[(sp_rank * s_per_rank):((sp_rank + 1) *
                                                        s_per_rank), :, :]
@@ -129,8 +125,8 @@ def sp_dit_forward(
     kwargs = dict(
         e=e0,
         seq_lens=seq_lens,
-        grid_sizes=grid_sizes, # not useful
-        freqs=self.freqs if not hasattr(self,"freqs_i") else (self.freqs_i,self.shmem_handle,self.iris_buffer_list),
+        grid_sizes=grid_sizes,
+        freqs=self.freqs,
         context=context,
         context_lens=context_lens)
 
@@ -147,12 +143,8 @@ def sp_dit_forward(
     x = self.unpatchify(x, grid_sizes)
     return [u.float() for u in x]
 
-def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16):
-    assert isinstance(freqs_i,tuple)
-    global stream_q,stream_k,stream_v
-    freqs_i,shmem_handle,iris_buffer_list = freqs_i
-    iris_q,iris_k,iris_v,iris_o,attn_buffer = iris_buffer_list
 
+def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
     b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
     half_dtypes = (torch.float16, torch.bfloat16)
 
@@ -167,85 +159,15 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
         return q, k, v
 
     q, k, v = qkv_fn(x)
-
-    bs = q.shape[0]
-    hs = q.shape[-1]
-    rank = get_rank()
-    sp_seq_len = q.shape[1]
-    hn = q.shape[2]
-    world_size = get_world_size()
-    heap_bases = shmem_handle.get_heap_bases()
-    rope_triton_kernel_bf16_alltoall_4D[(sp_seq_len,1,1)](q,freqs_i,hs,rank,sp_seq_len,hn, iris_q,world_size,heap_bases)
-    rope_triton_kernel_bf16_alltoall_4D[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_k,world_size,heap_bases)
-    triton_all_to_all_4D_bf16_forward[(sp_seq_len,1,1)](v,hs,hn,sp_seq_len,rank,world_size,iris_v,heap_bases)
-    shmem_handle.barrier()
-
-    # q = torch.empty([bs,sp_seq_len*world_size,hn//world_size,hs],dtype=iris_q.dtype,device=iris_q.device).copy_(iris_q)
-    # k = torch.empty([bs,sp_seq_len*world_size,hn//world_size,hs],dtype=iris_q.dtype,device=iris_q.device).copy_(iris_k)
-    # v = torch.empty([bs,sp_seq_len*world_size,hn//world_size,hs],dtype=iris_q.dtype,device=iris_q.device).copy_(iris_v)
-    # shmem_handle.barrier()
-
-    # print(f"rank {rank}: {q.shape = },{k.shape = },{v.shape = },{seq_lens = },{self.window_size = }\n")
-    iris_o.copy_(
-        flash_attention(
-            iris_q,
-            iris_k,
-            iris_v,
-            k_lens=seq_lens,
-            window_size=self.window_size,
-        )
-    )
-    x = attn_buffer
- 
-    # x = all_to_all(x, scatter_dim=1, gather_dim=2)
-    # triton_all_to_all_4D_bf16_backward[(sp_seq_len,1,1)](x,hs,hn//world_size,sp_seq_len*world_size,rank,world_size,iris_o,heap_bases)
-    triton_all_to_all_4D_bf16_backward[(sp_seq_len,1,1)](iris_o,hs,hn//world_size,sp_seq_len*world_size,rank,world_size,x,heap_bases)
-    # iris_o = iris_o.flatten(2)
-    shmem_handle.barrier()
-    x = x.flatten(2)
-    x = self.o(x)
-    return x
-
-def sp_attn_forward1(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
-    b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
-    half_dtypes = (torch.float16, torch.bfloat16)
-
-    def half(x):
-        return x if x.dtype in half_dtypes else x.to(dtype)
-
-    # query, key, value function
-    def qkv_fn(x):
-        q = self.norm_q(self.q(x)).view(b, s, n, d)
-        k = self.norm_k(self.k(x)).view(b, s, n, d)
-        v = self.v(x).view(b, s, n, d)
-        return q, k, v
-
-    q, k, v = qkv_fn(x)
-    
-    # 保存qkv
-    rank = get_rank()
-    # torch.save(q,f"rank_{rank}_before_rope_q.pt")
-    # torch.save(k,f"rank_{rank}_before_rope_k.pt")
-    # torch.save(v,f"rank_{rank}_before_rope_v.pt")
-    # torch.save(grid_sizes,f"rank_{rank}_grid_sizes.pt")
-    # torch.save(freqs,f"rank_{rank}_freqs.pt")
-
     q = rope_apply(q, grid_sizes, freqs)
     k = rope_apply(k, grid_sizes, freqs)
-    q=half(q)
-    k=half(k)
-    v=half(v)
-    # 此处将qkv tensor保存下来,然后assert
-    # torch.save(q,f"rank_{rank}_rope_half_output_before_alltoall_q.pt")
-    # torch.save(k,f"rank_{rank}_rope_half_output_before_alltoall_k.pt")
-    # torch.save(v,f"rank_{rank}_rope_half_output_before_alltoall_v.pt")
-    # assert 0,"saving complete!"
 
     x = distributed_attention(
-        q,k,v,
+        half(q),
+        half(k),
+        half(v),
         seq_lens,
         window_size=self.window_size,
-        rank = get_rank()
     )
 
     # output
