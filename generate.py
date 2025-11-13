@@ -333,9 +333,8 @@ def generate(args):
             rank=rank,
             world_size=world_size)
         # pre-compute image size,for buffer allocation, optimize for all to all using iris
-        img_temp = Image.open(args.image).convert("RGB")
-
-        h, w = img_temp.shape[1:]
+        import torchvision.transforms.functional as TF
+        h, w = TF.to_tensor(Image.open(args.image).convert("RGB")).sub_(0.5).div_(0.5).to("cpu").shape[1:]
         aspect_ratio = h / w
         max_area = int(eval(args.size))
         cfg_temp = WAN_CONFIGS[args.task]
