@@ -337,7 +337,10 @@ def generate(args):
         all_to_all_buffer_v = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
         all_to_all_buffer_o = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
         attn_buffer = shmem.zeros([1,13640,40,128],dtype=torch.bfloat16,device="cuda")
-        iris_all_to_all_buffers = [all_to_all_buffer_q,all_to_all_buffer_k,all_to_all_buffer_v,all_to_all_buffer_o,attn_buffer]
+        streamq = torch.cuda.Stream(device = f"cuda:{local_rank}")
+        streamk = torch.cuda.Stream(device = f"cuda:{local_rank}")
+        streamv = torch.cuda.Stream(device = f"cuda:{local_rank}")
+        iris_all_to_all_buffers = [all_to_all_buffer_q,all_to_all_buffer_k,all_to_all_buffer_v,all_to_all_buffer_o,attn_buffer,streamq,streamk,streamv]
 
 
     else:

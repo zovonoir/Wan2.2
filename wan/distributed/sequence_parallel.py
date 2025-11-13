@@ -145,10 +145,6 @@ def sp_dit_forward(
     x = self.unpatchify(x, grid_sizes)
     return [u.float() for u in x]
 
-streamq = torch.cuda.Stream()
-streamk = torch.cuda.Stream()
-streamv = torch.cuda.Stream()
-
 def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16):
     if False:
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
@@ -185,7 +181,7 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
         assert isinstance(freqs_i,tuple)
         global stream_q,stream_k,stream_v
         freqs_i,shmem_handle,iris_buffer_list = freqs_i
-        iris_q,iris_k,iris_v,iris_o,attn_buffer = iris_buffer_list
+        iris_q,iris_k,iris_v,iris_o,attn_buffer,streamq,streamk,streamv = iris_buffer_list
 
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
         half_dtypes = (torch.float16, torch.bfloat16)
@@ -210,7 +206,6 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
         world_size = get_world_size()
         heap_bases = shmem_handle.get_heap_bases()
 
-        # KERNEL命名不合适,需要改名
         with streamq:
             rope_alltoall_4D_bf16_forward[(sp_seq_len,1,1)](q,freqs_i,hs,rank,sp_seq_len,hn, iris_q,world_size,heap_bases)
         with streamk:
