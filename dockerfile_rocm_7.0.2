@@ -47,7 +47,6 @@ RUN git clone https://github.com/zovonoir/Wan2.2.git && cd Wan2.2 && git checkou
 RUN mkdir -p /app/Wan2.2/generate_video
 RUN apt update && apt install -y p7zip-full
 
-COPY aiter /app/
-RUN cd aiter && python3 setup.py develop
+RUN git clone https://github.com/ROCm/aiter.git aiter && cd aiter && git checkout a6652a7790627ec769aa42f56da1d51001e63f98  && git submodule sync && git submodule update --init --recursive && python3 setup.py develop
 
 WORKDIR /app
