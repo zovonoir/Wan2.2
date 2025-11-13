@@ -345,14 +345,12 @@ def generate(args):
         max_seq_len = ((int(args.frame_num) - 1) // cfg_temp.vae_stride[0] + 1) * lat_h * lat_w // (cfg_temp.patch_size[1] * cfg_temp.patch_size[2])
         max_seq_len = int(math.ceil(max_seq_len / world_size)) * world_size
 
-        assert 0,f"!!!!!!!!!!!!!!!!!!!!{max_seq_len = }!!!!!!!!!!!!!!!!!"
-
-        shmem = iris.iris(1024*1024*1024*4) # 4G
-        all_to_all_buffer_q = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda") # 这里的参数量后面再补充为可配置的
-        all_to_all_buffer_k = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
-        all_to_all_buffer_v = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
-        all_to_all_buffer_o = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
-        attn_buffer = shmem.zeros([1,13640,40,128],dtype=torch.bfloat16,device="cuda")
+        shmem = iris.iris(1024*1024*1024*1) # 1GB 
+        all_to_all_buffer_q = shmem.zeros([1,max_seq_len,cfg_temp.num_heads//world_size,128],dtype=torch.bfloat16,device="cuda") # 这里的参数量后面再补充为可配置的
+        all_to_all_buffer_k = shmem.zeros([1,max_seq_len,cfg_temp.num_heads//world_size,128],dtype=torch.bfloat16,device="cuda")
+        all_to_all_buffer_v = shmem.zeros([1,max_seq_len,cfg_temp.num_heads//world_size,128],dtype=torch.bfloat16,device="cuda")
+        all_to_all_buffer_o = shmem.zeros([1,max_seq_len,cfg_temp.num_heads//world_size,128],dtype=torch.bfloat16,device="cuda")
+        attn_buffer = shmem.zeros([1,max_seq_len // world_size,cfg_temp.num_heads,128],dtype=torch.bfloat16,device="cuda")
         iris_all_to_all_buffers = [all_to_all_buffer_q,all_to_all_buffer_k,all_to_all_buffer_v,all_to_all_buffer_o,attn_buffer]
     else:
         assert not (
