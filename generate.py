@@ -14,7 +14,8 @@ import torch
 import torch.distributed as dist
 from PIL import Image
 import iris
-
+import numpy as np
+import math
 import wan
 from wan.configs import MAX_AREA_CONFIGS, SIZE_CONFIGS, SUPPORTED_SIZES, WAN_CONFIGS
 from wan.distributed.util import init_distributed_group
@@ -331,6 +332,21 @@ def generate(args):
             init_method="env://",
             rank=rank,
             world_size=world_size)
+        # pre-compute image size,for buffer allocation, optimize for all to all using iris
+        img_temp = Image.open(args.image).convert("RGB")
+
+        h, w = img.shape[1:]
+        aspect_ratio = h / w
+        max_area = int(eval(args.size))
+        cfg_temp = WAN_CONFIGS[args.task]
+        lat_h = round(np.sqrt(max_area * aspect_ratio) // cfg_temp.vae_stride[1] // cfg_temp.patch_size[1] * cfg_temp.patch_size[1])
+        lat_w = round(np.sqrt(max_area / aspect_ratio) // cfg_temp.vae_stride[2] // cfg_temp.patch_size[2] * cfg_temp.patch_size[2])
+        h = lat_h * cfg_temp.vae_stride[1]
+        w = lat_w * cfg_temp.vae_stride[2]
+        max_seq_len = ((int(args.frame_num) - 1) // cfg_temp.vae_stride[0] + 1) * lat_h * lat_w // (cfg_temp.patch_size[1] * cfg_temp.patch_size[2])
+        max_seq_len = int(math.ceil(max_seq_len / world_size)) * world_size
+
+        assert 0,f"!!!!!!!!!!!!!!!!!!!!{max_seq_len = }!!!!!!!!!!!!!!!!!"
 
         shmem = iris.iris(1024*1024*1024*4) # 4G
         all_to_all_buffer_q = shmem.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda") # 这里的参数量后面再补充为可配置的

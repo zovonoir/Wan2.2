@@ -1,0 +1,72 @@
+FROM ubuntu:22.04
+
+RUN mkdir -p /app
+WORKDIR /app
+ENV DEBIAN_FRONTEND=noninteractive
+
+# install rocm 7.0.2
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential libgfortran5 libgl1 libglib2.0-dev liblzma-dev \
+    ninja-build python3 python3-dev python3-packaging python3-pip \
+    python3-venv wget vim git rsync dialog \
+    && wget https://repo.radeon.com/amdgpu-install/7.0.2/ubuntu/jammy/amdgpu-install_7.0.2.70002-1_all.deb \
+    && apt-get install -y ./amdgpu-install_7.0.2.70002-1_all.deb \
+    && apt-get update && apt-get install -y rocm && rm -rf /var/lib/apt/lists/*
+RUN groupadd -r -f render && groupadd -r -f video && usermod -a -G render,video root
+
+# install python wheel
+RUN apt install -y python3-setuptools python3-wheel && pip3 install --upgrade pip && \
+        pip3 install --pre --no-cache-dir torch=="2.10.0.dev20251023+rocm7.0" torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/rocm7.0
+
+
+RUN pip3 install --no-cache-dir "opencv-python>=4.9.0.80" \
+                                "diffusers>=0.31.0" \
+                                "transformers>=4.49.0,<=4.51.3" \
+                                "tokenizers>=0.20.3" \
+                                "accelerate>=1.1.1" \
+                                "tqdm" \
+                                "imageio[ffmpeg]" \
+                                "easydict" \
+                                "ftfy" \
+                                "dashscope" \
+                                "imageio-ffmpeg" \
+                                "numpy>=1.23.5,<2" \
+                                decord \
+                                librosa \
+                                ninja
+
+RUN ln -s python3 /usr/bin/python
+RUN git clone https://github.com/ROCm/iris.git && cd iris && git checkout 0dfc460e37517c05ab88f1b348d491ae30abb673 && pip install -e .
+
+COPY ./flash_attn-2.8.3-cp310-cp310-linux_x86_64.whl /app/flash_attn-2.8.3-cp310-cp310-linux_x86_64.whl
+RUN pip3 install /app/flash_attn-2.8.3-cp310-cp310-linux_x86_64.whl
+
+RUN pip3 install --no-cache-dir peft
+
+RUN git clone https://github.com/zovonoir/Wan2.2.git && cd Wan2.2 && git checkout iris_rope_alltoall && git pull
+RUN mkdir -p /app/Wan2.2/generate_video
+RUN apt update && apt install -y p7zip-full
+
+
+
+
+RUN pip3 install --no-cache-dir tqdm imageio easydict ftfy dashscope imageio-ffmpeg decord joblib msgpack \
+                "opencv-python>=4.9.0.80" \
+                "diffusers>=0.31.0" \
+                "transformers>=4.49.0" \
+                "tokenizers>=0.20.3" \
+                "accelerate>=1.1.1" \
+                "gradio>=5.0.0" \
+                "numpy>=1.23.5,<2" \
+                "xfuser>=0.4.1" \
+                "xgrammar==0.1.18" \
+                "peft>=0.17.0"
+
+RUN git clone https://github.com/feifeibear/long-context-attention.git long-context-attention
+RUN git clone https://github.com/ROCm/aiter.git aiter
+COPY ./yunchang_aiter_new.patch /app/long-context-attention/
+RUN cd long-context-attention && git checkout d1530179ca1713952d5ee88368ae908357a0af21 && git apply yunchang_aiter_new.patch  && pip install -e .
+
+
+
+

@@ -1,51 +1,36 @@
 
-# import flash_attn
+import flash_attn
 
 import torch
 import os
 import torch.distributed as dist
-import aiter 
+# import aiter 
+# import iris
+
+rank = int(os.getenv("RANK", 0))
+world_size = int(os.getenv("WORLD_SIZE", 1))
+local_rank = int(os.getenv("LOCAL_RANK", 0))
+device = local_rank
 
 
-import argparse
-
-
-parser = argparse.ArgumentParser(description='Flash Attention Forward Performance Test')
-    
-# Tensor shape and attention parameters
-parser.add_argument('-rank', type=int, required=True, help='Batch size for input tensors')
-
-args  = parser.parse_args()
-
-
-# 设置单线程，避免CPU竞争
-torch.set_num_threads(1)
-
-# rank = int(os.environ["RANK"])
-# world_size =  int(os.environ["WORLD_SIZE"])
-# dist.init_process_group(
-#     backend="nccl",
-#     device_id=torch.device(f"cuda:{rank}"),
-#     world_size=world_size)
-
-rank = args.rank
-world_size = 8
-
-# 设置当前进程使用的GPU
-torch.cuda.set_device(rank)
-device = f"cuda:{rank}"
-
-print(f"Rank {rank}: Using device {device}, CPU affinity: {os.sched_getaffinity(0)}")
+torch.cuda.set_device(local_rank)
+dist.init_process_group(
+    backend="nccl",
+    init_method="env://",
+    rank=rank,
+    world_size=world_size)
 
 # 在指定的GPU上创建数据
-iris_q = torch.randn([1,13640*8,5,128],dtype=torch.bfloat16,device=device)
-iris_k = torch.randn([1,13640*8,5,128],dtype=torch.bfloat16,device=device)
-iris_v = torch.randn([1,13640*8,5,128],dtype=torch.bfloat16,device=device)
+# shmem = iris.iris(1024*1024*1024*4) # 4G
+# iris_q = shmem.empty([1,13640*8,5,128],dtype=torch.bfloat16,device="cuda")
+# iris_k = shmem.empty([1,13640*8,5,128],dtype=torch.bfloat16,device="cuda")
+# iris_v = shmem.empty([1,13640*8,5,128],dtype=torch.bfloat16,device="cuda")
+# iris_o = shmem.empty([1,13640*8,5,128],dtype=torch.bfloat16,device="cuda")
 
-garbage = []
 
-# for i in range(25): # 50G
-#     garbage.append(torch.empty([1024,1024,1024],dtype=torch.half,device="cuda"))
+iris_q = torch.empty([1,13640*8,5,128],dtype=torch.bfloat16,device="cuda")
+iris_k = torch.empty([1,13640*8,5,128],dtype=torch.bfloat16,device="cuda")
+iris_v = torch.empty([1,13640*8,5,128],dtype=torch.bfloat16,device="cuda")
 
 def flash_attention(
     q,
@@ -181,8 +166,6 @@ def flash_attention_aiter(
     # output
     return x.type(out_dtype)
 
-import random
-
 with torch.profiler.profile(
     activities=[torch.profiler.ProfilerActivity.CPU,torch.profiler.ProfilerActivity.CUDA],
     record_shapes=False,
@@ -190,27 +173,17 @@ with torch.profiler.profile(
     with_stack=True,
     with_flops=False
 ) as prof:
-    for i in range(200):
-        flash_attention_aiter(
+    for i in range(500):
+        flash_attention(
             iris_q,
             iris_k,
             iris_v,
             k_lens=torch.tensor([109120],dtype=torch.long,device=device),
             window_size=(-1,-1),
         )
-trace_path = f"flash_attention_pressure_testing_rank_{rank}_world_size_{world_size}.json"
+trace_path = f"flash_attention_pressure_testing_rank_{local_rank}_world_size_{world_size}.json"
 prof.export_chrome_trace(trace_path)
 print(f"trace saved to {trace_path}")
-
-
-# for i in range(5):
-#     flash_attention_aiter(
-#         iris_q,
-#         iris_k,
-#         iris_v,
-#         k_lens=torch.tensor([109120],dtype=torch.long,device=device),
-#         window_size=(-1,-1),
-#     )
 
 torch.cuda.synchronize()
 
