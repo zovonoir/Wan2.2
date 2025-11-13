@@ -5,7 +5,9 @@ import torch.cuda.amp as amp
 from ..modules.model import sinusoidal_embedding_1d
 from .ulysses import distributed_attention
 from .util import gather_forward, get_rank, get_world_size
-
+from .triton_kernels import *
+from ..modules.attention import flash_attention
+from .util import all_to_all
 
 def pad_freqs(original_tensor, target_len):
     seq_len, s1, s2 = original_tensor.shape
@@ -126,7 +128,7 @@ def sp_dit_forward(
         e=e0,
         seq_lens=seq_lens,
         grid_sizes=grid_sizes,
-        freqs=self.freqs,
+        freqs=self.freqs if not hasattr(self,"freqs_i") else (self.freqs_i,self.shmem_handle,self.iris_buffer_list),
         context=context,
         context_lens=context_lens)
 
@@ -145,32 +147,81 @@ def sp_dit_forward(
 
 
 def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
-    b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
-    half_dtypes = (torch.float16, torch.bfloat16)
+    if False:
+        b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
+        half_dtypes = (torch.float16, torch.bfloat16)
 
-    def half(x):
-        return x if x.dtype in half_dtypes else x.to(dtype)
+        def half(x):
+            return x if x.dtype in half_dtypes else x.to(dtype)
 
-    # query, key, value function
-    def qkv_fn(x):
-        q = self.norm_q(self.q(x)).view(b, s, n, d)
-        k = self.norm_k(self.k(x)).view(b, s, n, d)
-        v = self.v(x).view(b, s, n, d)
-        return q, k, v
+        # query, key, value function
+        def qkv_fn(x):
+            q = self.norm_q(self.q(x)).view(b, s, n, d)
+            k = self.norm_k(self.k(x)).view(b, s, n, d)
+            v = self.v(x).view(b, s, n, d)
+            return q, k, v
 
-    q, k, v = qkv_fn(x)
-    q = rope_apply(q, grid_sizes, freqs)
-    k = rope_apply(k, grid_sizes, freqs)
+        q, k, v = qkv_fn(x)
+        q = rope_apply(q, grid_sizes, freqs)
+        k = rope_apply(k, grid_sizes, freqs)
 
-    x = distributed_attention(
-        half(q),
-        half(k),
-        half(v),
-        seq_lens,
-        window_size=self.window_size,
-    )
+        x = distributed_attention(
+            half(q),
+            half(k),
+            half(v),
+            seq_lens,
+            window_size=self.window_size,
+        )
 
-    # output
-    x = x.flatten(2)
-    x = self.o(x)
-    return x
+        # output
+        x = x.flatten(2)
+        x = self.o(x)
+        return x
+    else:
+
+        assert isinstance(freqs_i,tuple)
+        global stream_q,stream_k,stream_v
+        freqs_i,shmem_handle,iris_buffer_list = freqs_i
+        iris_q,iris_k,iris_v,iris_o,attn_buffer = iris_buffer_list
+
+        b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
+        half_dtypes = (torch.float16, torch.bfloat16)
+
+        def half(x):
+            return x if x.dtype in half_dtypes else x.to(dtype)
+
+        # query, key, value function
+        def qkv_fn(x):
+            q = self.norm_q(self.q(x)).view(b, s, n, d)
+            k = self.norm_k(self.k(x)).view(b, s, n, d)
+            v = self.v(x).view(b, s, n, d)
+            return q, k, v
+
+        q, k, v = qkv_fn(x)
+
+        bs = q.shape[0]
+        hs = q.shape[-1]
+        rank = get_rank()
+        sp_seq_len = q.shape[1]
+        hn = q.shape[2]
+        world_size = get_world_size()
+        heap_bases = shmem_handle.get_heap_bases()
+
+        rope_triton_kernel_bf16_alltoall_4D[(sp_seq_len,1,1)](q,freqs_i,hs,rank,sp_seq_len,hn, iris_q,world_size,heap_bases)
+        rope_triton_kernel_bf16_alltoall_4D[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_k,world_size,heap_bases)
+        triton_all_to_all_4D_bf16_forward[(sp_seq_len,1,1)](v,hs,hn,sp_seq_len,rank,world_size,iris_v,heap_bases)
+        shmem_handle.barrier()
+
+        x = flash_attention(
+            iris_q,
+            iris_k,
+            iris_v,
+            k_lens=seq_lens,
+            window_size=self.window_size,
+        )
+        x = all_to_all(x, scatter_dim=1, gather_dim=2)
+
+        # output
+        x = x.flatten(2)
+        x = self.o(x)
+        return x
