@@ -355,7 +355,8 @@ def generate(args):
         # streamq = torch.cuda.Stream(device = f"cuda:{local_rank}")
         # streamk = torch.cuda.Stream(device = f"cuda:{local_rank}")
         # streamv = torch.cuda.Stream(device = f"cuda:{local_rank}")
-        iris_all_to_all_buffers = [all_to_all_buffer_q,all_to_all_buffer_k,all_to_all_buffer_v,all_to_all_buffer_o,attn_buffer,streamq,streamk,streamv]
+        # iris_all_to_all_buffers = [all_to_all_buffer_q,all_to_all_buffer_k,all_to_all_buffer_v,all_to_all_buffer_o,attn_buffer,streamq,streamk,streamv]
+        iris_all_to_all_buffers = [all_to_all_buffer_q,all_to_all_buffer_k,all_to_all_buffer_v,all_to_all_buffer_o,attn_buffer]
 
     else:
         assert not (
