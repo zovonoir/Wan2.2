@@ -208,12 +208,12 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
 
         with streamq:
             rope_alltoall_4D_bf16_forward[(sp_seq_len,1,1)](q,freqs_i,hs,rank,sp_seq_len,hn, iris_q,world_size,heap_bases)
+        torch.cuda.current_stream().wait_stream(streamq)
         with streamk:
             rope_alltoall_4D_bf16_forward[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_k,world_size,heap_bases)
+        torch.cuda.current_stream().wait_stream(streamk)
         with streamv:
             all_to_all_4D_bf16_forward[(sp_seq_len,1,1)](v,hs,hn,sp_seq_len,rank,world_size,iris_v,heap_bases)
-        torch.cuda.current_stream().wait_stream(streamq)
-        torch.cuda.current_stream().wait_stream(streamk)
         torch.cuda.current_stream().wait_stream(streamv)
         shmem_handle.barrier()
 
