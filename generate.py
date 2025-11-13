@@ -335,7 +335,7 @@ def generate(args):
         # pre-compute image size,for buffer allocation, optimize for all to all using iris
         img_temp = Image.open(args.image).convert("RGB")
 
-        h, w = img.shape[1:]
+        h, w = img_temp.shape[1:]
         aspect_ratio = h / w
         max_area = int(eval(args.size))
         cfg_temp = WAN_CONFIGS[args.task]
