@@ -202,3 +202,136 @@ def all_to_all_4D_bf16_backward(iris_input_buffer,
                 value = head_data,
                 mask = None
             )
+
+
+@triton.jit
+def load_data_from_target_rank(iris_input_buffer,
+                    hs:tl.constexpr,
+                    in_hn:tl.constexpr, # 5
+                    seq_this_rank:tl.constexpr, # 109120
+                    local_rank:tl.constexpr,
+                    world_size:tl.constexpr,
+                    local_output_bufer,
+                    target_rank:tl.constexpr,
+                    heap_bases:tl.tensor):
+    pid = tl.program_id(0)
+    output_seq_len = seq_this_rank // world_size
+    out_hn = in_hn * world_size
+    remote_data_start_offset = (local_rank * output_seq_len)*(in_hn * hs) + pid * (in_hn * hs)
+    local_output_start_offset = pid * out_hn * hs
+    for head_idx in tl.range(0,in_hn):
+        remote_ptrs = iris_input_buffer + remote_data_start_offset + head_idx * hs + tl.arange(0,hs)
+        head_data = iris.load(
+            pointer = remote_ptrs,
+            to_rank = local_rank,
+            from_rank = target_rank,
+            heap_bases = heap_bases,
+            mask = None
+        )
+        tl.store(
+            pointer=local_output_bufer + local_output_start_offset + target_rank * in_hn * hs + head_idx *hs + tl.arange(0,hs),
+            value = head_data,
+            mask = None
+        )
+
+
+@triton.jit
+def all_to_all_4D_bf16_backward_no_barrier1(iris_input_buffer,
+                    hs:tl.constexpr,
+                    in_hn:tl.constexpr, # 5
+                    seq_this_rank:tl.constexpr, # 109120
+                    local_rank:tl.constexpr,
+                    world_size:tl.constexpr,
+                    local_output_bufer,
+                    lock,
+                    heap_bases:tl.tensor):
+    iris.atomic_cas(
+            pointer=lock,
+            cmp=0,
+            val=1,
+            from_rank=local_rank,
+            to_rank=local_rank,
+            heap_bases=heap_bases,
+            # sem="release",
+            scope="sys"
+        )
+    finished_flags = 0
+    mask = (1 << world_size) - 1 # 1111 1111 
+    all_finished = ((finished_flags & mask) == mask)
+
+    while not all_finished:
+        for target_rank in tl.range(0,world_size):
+            # check if this rank's data is loaded, if not, proceed
+            rank_finished = (((finished_flags >> target_rank) & 1) == 1)
+            if not rank_finished:
+                if local_rank == target_rank:
+                    load_data_from_target_rank(
+                        iris_input_buffer,hs,in_hn,seq_this_rank,
+                        local_rank,world_size,local_output_bufer,
+                        target_rank,heap_bases)
+
+                    finished_flags = finished_flags | (1 << target_rank)
+
+                if target_rank != local_rank:
+                    lock_released = (iris.atomic_cas(
+                                pointer = lock, cmp = 1, val = 1, 
+                                from_rank = local_rank, to_rank = target_rank, 
+                                heap_bases=heap_bases,scope="sys") == 1)
+                    if lock_released:
+                        load_data_from_target_rank(
+                            iris_input_buffer,hs,in_hn,seq_this_rank,
+                            local_rank,world_size,local_output_bufer,
+                            target_rank,heap_bases)
+                        finished_flags = finished_flags | (1 << target_rank)
+        all_finished = ((finished_flags & mask) == mask)
+
+@triton.jit
+def all_to_all_4D_bf16_backward_no_barrier(iris_input_buffer,
+                    hs:tl.constexpr,
+                    in_hn:tl.constexpr, # 5
+                    seq_this_rank:tl.constexpr, # 109120
+                    local_rank:tl.constexpr,
+                    world_size:tl.constexpr,
+                    local_output_bufer,
+                    lock,
+                    heap_bases:tl.tensor):
+    # iris.atomic_cas(pointer = lock, cmp = 0, val = 1, from_rank = local_rank, 
+    #         to_rank = local_rank, heap_bases = heap_bases, sem="release")
+    iris.atomic_cas(
+            pointer=lock,
+            cmp=0,
+            val=1,
+            from_rank=local_rank,
+            to_rank=local_rank,
+            heap_bases=heap_bases,
+            # sem="release",
+            scope="sys"
+        )
+    finished_flags = 0
+    mask = (1 << world_size) - 1 # 1111 1111 
+    all_finished = ((finished_flags & mask) == mask)
+
+    # load local data first
+    load_data_from_target_rank(
+        iris_input_buffer,hs,in_hn,seq_this_rank,
+        local_rank,world_size,local_output_bufer,
+        local_rank,heap_bases)
+    finished_flags = finished_flags | (1 << local_rank)
+
+    while not all_finished:
+        for index in tl.range(local_rank,local_rank-1+world_size):
+            target_rank = index % world_size
+            # check if this rank's data is loaded, if not, proceed
+            rank_finished = ((finished_flags >> target_rank) & 1) == 1
+            if not rank_finished:
+                lock_released = (iris.atomic_cas(
+                    pointer = lock, cmp = 1, val = 1, 
+                    from_rank = local_rank, to_rank = target_rank, 
+                    heap_bases=heap_bases, sem="acquire") == 1)
+                if lock_released:
+                    load_data_from_target_rank(
+                        iris_input_buffer,hs,in_hn,seq_this_rank,
+                        local_rank,world_size,local_output_bufer,
+                        target_rank,heap_bases)
+                    finished_flags = finished_flags | (1 << target_rank)
+        all_finished = ((finished_flags & mask) == mask)

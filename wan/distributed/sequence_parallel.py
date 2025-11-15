@@ -145,6 +145,8 @@ def sp_dit_forward(
     x = self.unpatchify(x, grid_sizes)
     return [u.float() for u in x]
 
+count = 0
+
 def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16):
     if False:
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
@@ -181,7 +183,7 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
         assert isinstance(freqs_i,tuple)
         global stream_q,stream_k,stream_v
         freqs_i,shmem_handle,iris_buffer_list = freqs_i
-        iris_q,iris_k,iris_v,iris_o,attn_buffer = iris_buffer_list
+        iris_q,iris_k,iris_v,iris_o,attn_buffer,lock = iris_buffer_list
 
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
         half_dtypes = (torch.float16, torch.bfloat16)
@@ -210,7 +212,10 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
         rope_alltoall_4D_bf16_forward[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_k,world_size,heap_bases)
         all_to_all_4D_bf16_forward[(sp_seq_len,1,1)](v,hs,hn,sp_seq_len,rank,world_size,iris_v,heap_bases)
         shmem_handle.barrier()
-
+        lock.fill_(0) # 锁必须放在这里,放在其他地方都不严谨
+        shmem_handle.barrier()
+        
+        shmem_handle.barrier()
         iris_o.copy_(
             flash_attention(
                 iris_q,
@@ -220,10 +225,13 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
                 window_size=self.window_size,
             )
         )
+    
+        # all_to_all_4D_bf16_backward[(sp_seq_len,1,1)](iris_o,hs,hn//world_size,sp_seq_len*world_size,rank,world_size,attn_buffer,heap_bases)
+        all_to_all_4D_bf16_backward_no_barrier1[(13640,1,1)](iris_o,hs,hn//world_size,sp_seq_len*world_size,rank,world_size,attn_buffer,lock,heap_bases)
 
-        shmem_handle.barrier()
-        all_to_all_4D_bf16_backward[(sp_seq_len,1,1)](iris_o,hs,hn//world_size,sp_seq_len*world_size,rank,world_size,attn_buffer,heap_bases)
-
+        # ref = all_to_all(iris_o,1,2)
+        # if torch.abs(ref - attn_buffer).sum() > 0.000001:
+        #     assert 0,ref - attn_buffer
         # output
         x = attn_buffer.flatten(2)
         x = self.o(x)
