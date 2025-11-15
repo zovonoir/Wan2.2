@@ -212,7 +212,7 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
         rope_alltoall_4D_bf16_forward[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_k,world_size,heap_bases)
         all_to_all_4D_bf16_forward[(sp_seq_len,1,1)](v,hs,hn,sp_seq_len,rank,world_size,iris_v,heap_bases)
         shmem_handle.barrier()
-        lock.fill_(0) # 锁必须放在这里,放在其他地方都不严谨
+        lock[0]=0
         shmem_handle.barrier()
 
         iris_o.copy_(
