@@ -214,8 +214,7 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
         shmem_handle.barrier()
         lock.fill_(0) # 锁必须放在这里,放在其他地方都不严谨
         shmem_handle.barrier()
-        
-        shmem_handle.barrier()
+
         iris_o.copy_(
             flash_attention(
                 iris_q,
@@ -226,11 +225,10 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
             )
         )
     
-        all_to_all_4D_bf16_backward_no_barrier[(13640,1,1)](iris_o,hs,hn//world_size,sp_seq_len*world_size,rank,world_size,attn_buffer,lock,heap_bases)
+        all_to_all_4D_bf16_backward_no_barrier[(13640,1,1)](iris_o,hs,hn//world_size,
+                                        sp_seq_len*world_size,rank,world_size,
+                                        attn_buffer,lock,heap_bases)
 
-        # ref = all_to_all(iris_o,1,2)
-        # if torch.abs(ref - attn_buffer).sum() > 0.000001:
-        #     assert 0,ref - attn_buffer
         # output
         x = attn_buffer.flatten(2)
         x = self.o(x)
