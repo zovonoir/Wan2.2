@@ -234,57 +234,6 @@ def load_data_from_target_rank(iris_input_buffer,
             mask = None
         )
 
-
-@triton.jit
-def all_to_all_4D_bf16_backward_no_barrier1(iris_input_buffer,
-                    hs:tl.constexpr,
-                    in_hn:tl.constexpr, # 5
-                    seq_this_rank:tl.constexpr, # 109120
-                    local_rank:tl.constexpr,
-                    world_size:tl.constexpr,
-                    local_output_bufer,
-                    lock,
-                    heap_bases:tl.tensor):
-    iris.atomic_cas(
-            pointer=lock,
-            cmp=0,
-            val=1,
-            from_rank=local_rank,
-            to_rank=local_rank,
-            heap_bases=heap_bases,
-            # sem="release",
-            scope="sys"
-        )
-    finished_flags = 0
-    mask = (1 << world_size) - 1 # 1111 1111 
-    all_finished = ((finished_flags & mask) == mask)
-
-    while not all_finished:
-        for target_rank in tl.range(0,world_size):
-            # check if this rank's data is loaded, if not, proceed
-            rank_finished = (((finished_flags >> target_rank) & 1) == 1)
-            if not rank_finished:
-                if local_rank == target_rank:
-                    load_data_from_target_rank(
-                        iris_input_buffer,hs,in_hn,seq_this_rank,
-                        local_rank,world_size,local_output_bufer,
-                        target_rank,heap_bases)
-
-                    finished_flags = finished_flags | (1 << target_rank)
-
-                if target_rank != local_rank:
-                    lock_released = (iris.atomic_cas(
-                                pointer = lock, cmp = 1, val = 1, 
-                                from_rank = local_rank, to_rank = target_rank, 
-                                heap_bases=heap_bases,scope="sys") == 1)
-                    if lock_released:
-                        load_data_from_target_rank(
-                            iris_input_buffer,hs,in_hn,seq_this_rank,
-                            local_rank,world_size,local_output_bufer,
-                            target_rank,heap_bases)
-                        finished_flags = finished_flags | (1 << target_rank)
-        all_finished = ((finished_flags & mask) == mask)
-
 @triton.jit
 def all_to_all_4D_bf16_backward_no_barrier(iris_input_buffer,
                     hs:tl.constexpr,
