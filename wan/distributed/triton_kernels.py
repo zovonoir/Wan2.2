@@ -244,14 +244,7 @@ def all_to_all_4D_bf16_backward_no_barrier(iris_input_buffer,
                     local_output_bufer,
                     lock,
                     heap_bases:tl.tensor):
-    iris.atomic_cas(
-            pointer=lock,
-            cmp=0,
-            val=1,
-            from_rank=local_rank,
-            to_rank=local_rank,
-            heap_bases=heap_bases
-        )
+    tl.store(lock,1)
     finished_flags = 0
     mask = (1 << world_size) - 1 # 1111 1111 
     all_finished = ((finished_flags & mask) == mask)
@@ -264,8 +257,7 @@ def all_to_all_4D_bf16_backward_no_barrier(iris_input_buffer,
     finished_flags = finished_flags | (1 << local_rank)
 
     while not all_finished:
-        for index in tl.range(local_rank + 1,local_rank-1+world_size):
-            target_rank = index % world_size
+        for target_rank in tl.range(0,world_size):
             # check if this rank's data is loaded, if not, proceed
             rank_finished = ((finished_flags >> target_rank) & 1) == 1
             if not rank_finished:

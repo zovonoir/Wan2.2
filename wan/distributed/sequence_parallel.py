@@ -226,8 +226,7 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
             )
         )
     
-        # all_to_all_4D_bf16_backward[(sp_seq_len,1,1)](iris_o,hs,hn//world_size,sp_seq_len*world_size,rank,world_size,attn_buffer,heap_bases)
-        all_to_all_4D_bf16_backward_no_barrier1[(13640,1,1)](iris_o,hs,hn//world_size,sp_seq_len*world_size,rank,world_size,attn_buffer,lock,heap_bases)
+        all_to_all_4D_bf16_backward_no_barrier[(13640,1,1)](iris_o,hs,hn//world_size,sp_seq_len*world_size,rank,world_size,attn_buffer,lock,heap_bases)
 
         # ref = all_to_all(iris_o,1,2)
         # if torch.abs(ref - attn_buffer).sum() > 0.000001:
