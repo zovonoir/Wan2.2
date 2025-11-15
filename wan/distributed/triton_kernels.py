@@ -87,7 +87,7 @@ def rope_alltoall_4D_bf16_forward(qk_ptr, freqs_ptr,
     output_seq_len = input_seq_len * world_size
     # [1,input_seq_len,input_head_num,head_size] -> [1,input_seq_len * world_size,input_head_num / world_size,head_size]
 
-    for head_idx in tl.range(0,in_hn,1): # for loop at head dimensionm,each program is responsible for single token
+    for head_idx in tl.range(0,in_hn,1,num_stages=4): # for loop at head dimensionm,each program is responsible for single token
         # load single head for x
         vx1_fp64 = tl.cast(tl.load(vx1_ptr_block_even + head_idx * hs,mask=even_mask,other=0.0),tl.float64) # is mask correct?
         vx2_fp64 = tl.cast(tl.load(vx1_ptr_block_odd + head_idx * hs,mask=odd_mask,other=0.0),tl.float64)
@@ -185,7 +185,7 @@ def all_to_all_4D_bf16_backward(iris_input_buffer,
     pid = tl.program_id(0)
     output_seq_len = seq_this_rank // world_size
     out_hn = in_hn * world_size
-    for target_rank in tl.range(0,world_size):
+    for target_rank in tl.range(0,world_size,num_stages=4):
         remote_data_start_offset = (local_rank * output_seq_len)*(in_hn * hs) + pid * (in_hn * hs)
         local_output_start_offset = pid * out_hn * hs
         for head_idx in tl.range(0,in_hn):
