@@ -60,7 +60,6 @@ def rope_alltoall_4D_bf16_forward(qk_ptr, freqs_ptr,
                     world_size:tl.constexpr,
                     heap_bases:tl.tensor
                     ):
-    # 每个program负责一个token,共40*128=5120个float32相乘
     program_id = tl.program_id(0)
     tl.static_assert(hs > 0 and (hs & (hs - 1)) == 0,f"PROG_SIZE only support power of 2!current is {hs}")
     freqs_rank_offset = hs * local_rank * seq_len_per_rank
