@@ -362,6 +362,10 @@ def generate(args):
             args.ulysses_size > 1
         ), f"sequence parallel are not supported in non-distributed environments."
 
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    start_event.record()
+
     if args.ulysses_size > 1:
         assert args.ulysses_size == world_size, f"The number of ulysses_size should be equal to the world size."
         init_distributed_group()
@@ -588,7 +592,14 @@ def generate(args):
                 merge_video_audio(video_path=args.save_file, audio_path="tts.wav")
     del video
 
+    end_event.record()
     torch.cuda.synchronize()
+    elapsed_time = start_event.elapsed_time(end_event) #ms
+    elapsed_time_sec = elapsed_time / 1000.0 #seconds
+
+    if int(os.environ.get('ENABLE_TIMING', '0')) != 0:
+        logging.info(f"Elapsed time to generate(rank {local_rank}) : {elapsed_time_sec:.3f} seconds")
+
     if dist.is_initialized():
         dist.barrier()
         dist.destroy_process_group()

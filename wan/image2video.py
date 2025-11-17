@@ -280,6 +280,11 @@ class WanI2V:
                 - H: Frame height (from max_area)
                 - W: Frame width from max_area)
         """
+        if int(os.environ.get('ENABLE_TIMING', '0')) != 0:
+            # Prepare CUDA events for timing
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+
         assert ((iris_shm_handle is not None) and (iris_buffer_list is not None)) or ((iris_shm_handle is None) and (iris_buffer_list is None))
         # preprocess
         guide_scale = (guide_scale, guide_scale) if isinstance(
@@ -418,7 +423,9 @@ class WanI2V:
             if offload_model:
                 torch.cuda.empty_cache()
 
-
+            if int(os.environ.get('ENABLE_TIMING', '0')) != 0:
+                start_event.record()
+            
             if int(os.environ.get('ENABLE_TORCH_PROFILER_DIT', '0')) != 0: # enable profiler
                 with torch.profiler.profile(
                     activities=[torch.profiler.ProfilerActivity.CPU,torch.profiler.ProfilerActivity.CUDA],
@@ -428,7 +435,7 @@ class WanI2V:
                     with_flops=False
                 ) as prof:
                     for _, t in enumerate(tqdm(timesteps)):
-                        if _ > 3:
+                        if _ > 5:
                             break
                         with torch.profiler.record_function(f"step_{_}_rank_{self.rank}"):
                             latent_model_input = [latent.to(self.device)]
@@ -500,6 +507,16 @@ class WanI2V:
 
                     x0 = [latent]
                     del latent_model_input, timestep
+
+
+            if int(os.environ.get('ENABLE_TIMING', '0')) != 0:
+                end_event.record()
+                torch.cuda.synchronize()
+                # Calculate the elapsed time
+                elapsed_time = start_event.elapsed_time(end_event) #ms
+                elapsed_time_sec = elapsed_time / 1000.0 #seconds
+                print(f"Elapsed time for dit (rank {self.rank}): {elapsed_time_sec:.3f} seconds")
+
 
             if offload_model:
                 self.low_noise_model.cpu()
