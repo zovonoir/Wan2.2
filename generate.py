@@ -352,7 +352,8 @@ def generate(args):
         all_to_all_buffer_v = shmem.zeros([1,max_seq_len,cfg_temp.num_heads//world_size,128],dtype=torch.bfloat16,device="cuda")
         all_to_all_buffer_o = shmem.zeros([1,max_seq_len,cfg_temp.num_heads//world_size,128],dtype=torch.bfloat16,device="cuda")
         attn_buffer = shmem.zeros([1,max_seq_len // world_size,cfg_temp.num_heads,128],dtype=torch.bfloat16,device="cuda")
-        iris_all_to_all_buffers = [all_to_all_buffer_q,all_to_all_buffer_k,all_to_all_buffer_v,all_to_all_buffer_o,attn_buffer]
+        lock = shmem.zeros([4096], dtype=torch.int32,device="cuda")
+        iris_all_to_all_buffers = [all_to_all_buffer_q,all_to_all_buffer_k,all_to_all_buffer_v,all_to_all_buffer_o,attn_buffer,lock]
 
     else:
         assert not (

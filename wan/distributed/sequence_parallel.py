@@ -178,9 +178,9 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
         return x
     else:
 
-        assert isinstance(freqs,tuple)
-        freqs_i,shmem_handle,iris_buffer_list = freqs
-        iris_q,iris_k,iris_v,iris_o,attn_buffer = iris_buffer_list
+        assert isinstance(freqs_i,tuple)
+        freqs_i,shmem_handle,iris_buffer_list = freqs_i
+        iris_q,iris_k,iris_v,iris_o,attn_buffer,lock = iris_buffer_list
 
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
         half_dtypes = (torch.float16, torch.bfloat16)
@@ -208,6 +208,8 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
         rope_alltoall_4D_bf16_forward[(sp_seq_len, 1, 1)](q, freqs_i, hs, rank, sp_seq_len, hn, iris_q, world_size, heap_bases)
         rope_alltoall_4D_bf16_forward[(sp_seq_len, 1, 1)](k, freqs_i, hs, rank, sp_seq_len, hn, iris_k, world_size, heap_bases)
         all_to_all_4D_bf16_forward[(sp_seq_len, 1, 1)](v, hs, hn, sp_seq_len, rank, world_size, iris_v, heap_bases)
+        lock[0] += 1
+        lock[lock[0]] = 0
         shmem_handle.barrier()
 
         iris_o.copy_(
@@ -220,8 +222,17 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
             )
         )
 
-        shmem_handle.barrier()
-        all_to_all_4D_bf16_backward[(sp_seq_len,1,1)](iris_o, hs, hn//world_size, sp_seq_len*world_size, rank, world_size, attn_buffer, heap_bases)
+        all_to_all_4D_bf16_backward_no_barrier[(13640,1,1)](
+                                        iris_input_buffer = iris_o,
+                                        hs = hs,
+                                        in_hn = hn//world_size,
+                                        seq_this_rank = sp_seq_len*world_size,
+                                        local_rank = rank,
+                                        world_size = world_size,
+                                        local_output_bufer = attn_buffer,
+                                        lock_base = lock,
+                                        lock_offset = lock[0].item(),
+                                        heap_bases = heap_bases)
 
         # output
         x = attn_buffer.flatten(2)
