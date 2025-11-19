@@ -60,7 +60,6 @@ def rope_alltoall_4D_bf16_forward(qk_ptr, freqs_ptr,
                     world_size:tl.constexpr,
                     heap_bases:tl.tensor
                     ):
-    # 每个program负责一个token,共40*128=5120个float32相乘
     program_id = tl.program_id(0)
     tl.static_assert(hs > 0 and (hs & (hs - 1)) == 0,f"PROG_SIZE only support power of 2!current is {hs}")
     freqs_rank_offset = hs * local_rank * seq_len_per_rank
@@ -87,7 +86,7 @@ def rope_alltoall_4D_bf16_forward(qk_ptr, freqs_ptr,
     output_seq_len = input_seq_len * world_size
     # [1,input_seq_len,input_head_num,head_size] -> [1,input_seq_len * world_size,input_head_num / world_size,head_size]
 
-    for head_idx in tl.range(0,in_hn,1): # for loop at head dimensionm,each program is responsible for single token
+    for head_idx in tl.range(0,in_hn,1,num_stages=4): # for loop at head dimensionm,each program is responsible for single token
         # load single head for x
         vx1_fp64 = tl.cast(tl.load(vx1_ptr_block_even + head_idx * hs,mask=even_mask,other=0.0),tl.float64) # is mask correct?
         vx2_fp64 = tl.cast(tl.load(vx1_ptr_block_odd + head_idx * hs,mask=odd_mask,other=0.0),tl.float64)
@@ -185,7 +184,7 @@ def all_to_all_4D_bf16_backward(iris_input_buffer,
     pid = tl.program_id(0)
     output_seq_len = seq_this_rank // world_size
     out_hn = in_hn * world_size
-    for target_rank in tl.range(0,world_size):
+    for target_rank in tl.range(0,world_size,num_stages=4):
         remote_data_start_offset = (local_rank * output_seq_len)*(in_hn * hs) + pid * (in_hn * hs)
         local_output_start_offset = pid * out_hn * hs
         for head_idx in tl.range(0,in_hn):
@@ -202,7 +201,6 @@ def all_to_all_4D_bf16_backward(iris_input_buffer,
                 value = head_data,
                 mask = None
             )
-
 
 @triton.jit
 def load_data_from_target_rank(iris_input_buffer,
@@ -244,14 +242,15 @@ def all_to_all_4D_bf16_backward_no_barrier(iris_input_buffer,
                     local_output_bufer,
                     lock_base,lock_offset,
                     heap_bases:tl.tensor):
-    # tl.store(lock_base+lock_offset,1)
 
-    iris.atomic_cas(
-                    pointer = lock_base + lock_offset, 
-                    cmp = 0, val = 1, 
-                    from_rank = local_rank, 
-                    to_rank = target_rank, 
-                    heap_bases=heap_bases)
+    pid = tl.program_id(0)
+    if pid == 0:
+        tl.store(lock_base + lock_offset,1,mask=None)
+    # iris.atomic_cas(pointer = lock_base + lock_offset, 
+    #                 cmp = 0, val = 1, 
+    #                 from_rank = local_rank, 
+    #                 to_rank = local_rank, 
+    #                 heap_bases=heap_bases)
 
     finished_flags = 0
     mask = (1 << world_size) - 1 # 1111 1111 

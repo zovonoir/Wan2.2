@@ -207,11 +207,9 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
         hn = q.shape[2]
         world_size = get_world_size()
         heap_bases = shmem_handle.get_heap_bases()
-
         rope_alltoall_4D_bf16_forward[(sp_seq_len,1,1)](q,freqs_i,hs,rank,sp_seq_len,hn, iris_q,world_size,heap_bases)
         rope_alltoall_4D_bf16_forward[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_k,world_size,heap_bases)
         all_to_all_4D_bf16_forward[(sp_seq_len,1,1)](v,hs,hn,sp_seq_len,rank,world_size,iris_v,heap_bases)
-        # shmem_handle.barrier()
         lock[0] += 1
         lock[lock[0]] = 0
         shmem_handle.barrier()

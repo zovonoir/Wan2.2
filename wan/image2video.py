@@ -428,7 +428,7 @@ class WanI2V:
                     with_flops=False
                 ) as prof:
                     for _, t in enumerate(tqdm(timesteps)):
-                        if _ > 3:
+                        if _ > 5:
                             break
                         with torch.profiler.record_function(f"step_{_}_rank_{self.rank}"):
                             latent_model_input = [latent.to(self.device)]
