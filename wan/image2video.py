@@ -394,7 +394,7 @@ class WanI2V:
 
             grid_sizes=self.calculate_grid_sizes(latent,y) # grid_sizes唯一作用就是辅助计算出real_freq_i,在这之后可以弃用
             real_freq_i=self.calculate_freqs_i(grid_sizes)
-
+            iris_buffer_list[-1][0]=0
             self.high_noise_model.freqs_i= real_freq_i
             self.high_noise_model.shmem_handle = iris_shm_handle
             self.high_noise_model.iris_buffer_list = iris_buffer_list

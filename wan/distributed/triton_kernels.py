@@ -242,9 +242,17 @@ def all_to_all_4D_bf16_backward_no_barrier(iris_input_buffer,
                     local_rank:tl.constexpr,
                     world_size:tl.constexpr,
                     local_output_bufer,
-                    lock,
+                    lock_base,lock_offset,
                     heap_bases:tl.tensor):
-    tl.store(lock,1)
+    # tl.store(lock_base+lock_offset,1)
+
+    iris.atomic_cas(
+                    pointer = lock_base + lock_offset, 
+                    cmp = 0, val = 1, 
+                    from_rank = local_rank, 
+                    to_rank = target_rank, 
+                    heap_bases=heap_bases)
+
     finished_flags = 0
     mask = (1 << world_size) - 1 # 1111 1111 
     all_finished = ((finished_flags & mask) == mask)
@@ -262,7 +270,7 @@ def all_to_all_4D_bf16_backward_no_barrier(iris_input_buffer,
             rank_finished = ((finished_flags >> target_rank) & 1) == 1
             if not rank_finished:
                 lock_released = (iris.atomic_cas(
-                    pointer = lock, cmp = 1, val = 1, 
+                    pointer = lock_base + lock_offset, cmp = 1, val = 1, 
                     from_rank = local_rank, to_rank = target_rank, 
                     heap_bases=heap_bases) == 1)
                 if lock_released:

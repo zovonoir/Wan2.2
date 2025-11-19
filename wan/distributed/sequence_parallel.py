@@ -211,8 +211,9 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
         rope_alltoall_4D_bf16_forward[(sp_seq_len,1,1)](q,freqs_i,hs,rank,sp_seq_len,hn, iris_q,world_size,heap_bases)
         rope_alltoall_4D_bf16_forward[(sp_seq_len,1,1)](k,freqs_i,hs,rank,sp_seq_len,hn, iris_k,world_size,heap_bases)
         all_to_all_4D_bf16_forward[(sp_seq_len,1,1)](v,hs,hn,sp_seq_len,rank,world_size,iris_v,heap_bases)
-        shmem_handle.barrier()
-        lock[0]=0
+        # shmem_handle.barrier()
+        lock[0] += 1
+        lock[lock[0]] = 0
         shmem_handle.barrier()
 
         iris_o.copy_(
@@ -227,7 +228,7 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs_i, dtype=torch.bfloat16
     
         all_to_all_4D_bf16_backward_no_barrier[(13640,1,1)](iris_o,hs,hn//world_size,
                                         sp_seq_len*world_size,rank,world_size,
-                                        attn_buffer,lock,heap_bases)
+                                        attn_buffer,lock,lock[0].item(),heap_bases)
 
         # output
         x = attn_buffer.flatten(2)
