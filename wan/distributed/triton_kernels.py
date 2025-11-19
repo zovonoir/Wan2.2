@@ -70,12 +70,14 @@ def rope_alltoall_4D_bf16_forward(qk_ptr, freqs_ptr,
     freqs_offset = tl.arange(0,hs) #  [0,1,2,3,4,5...],freq只能load128个数据,并且复用
     freqs_offset_swap = tl.arange(0,hs) ^ 0x0001 # [1,0,3,2,5,4...]
     coe = 2*(tl.arange(0,hs) % 2) - 1 # [-1,1,-1,1,-1,1...]
-    even_mask = even_offset < hs # all true
-    odd_mask = odd_offset < hs
-    freqs_mask = freqs_offset < hs
-    freqs_mask_swap = freqs_offset_swap < hs
-    vy1_fp64 = tl.cast(tl.load(freq_program_start_ptr + freqs_offset,mask=freqs_mask,other=0.0),tl.float64)
-    vy2_fp64 = tl.cast(tl.load(freq_program_start_ptr + freqs_offset_swap,mask=freqs_mask_swap,other=0.0),tl.float64)
+    # even_mask = even_offset < hs # all true
+    # odd_mask = odd_offset < hs
+    # freqs_mask = freqs_offset < hs
+    # freqs_mask_swap = freqs_offset_swap < hs
+    # vy1_fp64 = tl.cast(tl.load(freq_program_start_ptr + freqs_offset,mask=freqs_mask,other=0.0),tl.float64)
+    # vy2_fp64 = tl.cast(tl.load(freq_program_start_ptr + freqs_offset_swap,mask=freqs_mask_swap,other=0.0),tl.float64)
+    vy1_fp64 = tl.cast(tl.load(freq_program_start_ptr + freqs_offset,mask=None),tl.float64)
+    vy2_fp64 = tl.cast(tl.load(freq_program_start_ptr + freqs_offset_swap,mask=None),tl.float64)
     vx1_ptr_block_even = qk_ptr + program_id * hs * in_hn + even_offset
     vx1_ptr_block_odd = qk_ptr + program_id * hs * in_hn + odd_offset
     output_mask = tl.arange(0,hs) < hs
@@ -88,8 +90,10 @@ def rope_alltoall_4D_bf16_forward(qk_ptr, freqs_ptr,
 
     for head_idx in tl.range(0,in_hn,1,num_stages=4): # for loop at head dimensionm,each program is responsible for single token
         # load single head for x
-        vx1_fp64 = tl.cast(tl.load(vx1_ptr_block_even + head_idx * hs,mask=even_mask,other=0.0),tl.float64) # is mask correct?
-        vx2_fp64 = tl.cast(tl.load(vx1_ptr_block_odd + head_idx * hs,mask=odd_mask,other=0.0),tl.float64)
+        # vx1_fp64 = tl.cast(tl.load(vx1_ptr_block_even + head_idx * hs,mask=even_mask,other=0.0),tl.float64) # is mask correct?
+        # vx2_fp64 = tl.cast(tl.load(vx1_ptr_block_odd + head_idx * hs,mask=odd_mask,other=0.0),tl.float64)
+        vx1_fp64 = tl.cast(tl.load(vx1_ptr_block_even + head_idx * hs,mask=None),tl.float64) # is mask correct?
+        vx2_fp64 = tl.cast(tl.load(vx1_ptr_block_odd + head_idx * hs,mask=None),tl.float64)
         complex_output_bf16 = tl.cast(vx1_fp64*vy1_fp64 + coe*vx2_fp64*vy2_fp64,tl.bfloat16) # NOTE: convert to bfloat16 before all to all procedure
 
         target_rank = head_idx // output_head_num
@@ -234,6 +238,56 @@ def load_data_from_target_rank(iris_input_buffer,
 
 
 @triton.jit
+def all_to_all_4D_bf16_backward_no_barrier_backup(iris_input_buffer,
+                    hs:tl.constexpr,
+                    in_hn:tl.constexpr, # 5
+                    seq_this_rank:tl.constexpr, # 109120
+                    local_rank:tl.constexpr,
+                    world_size:tl.constexpr,
+                    local_output_bufer,
+                    lock_base,lock_offset,
+                    heap_bases:tl.tensor):
+
+    pid = tl.program_id(0)
+    if pid == 0:
+        tl.store(lock_base + lock_offset,1,mask=None)
+    # iris.atomic_cas(pointer = lock_base + lock_offset, 
+    #                 cmp = 0, val = 1, 
+    #                 from_rank = local_rank, 
+    #                 to_rank = local_rank, 
+    #                 heap_bases=heap_bases)
+
+    finished_flags = 0
+    mask = (1 << world_size) - 1 # 1111 1111 
+    all_finished = ((finished_flags & mask) == mask)
+
+    # load local data first
+    load_data_from_target_rank(
+        iris_input_buffer,hs,in_hn,seq_this_rank,
+        local_rank,world_size,local_output_bufer,
+        local_rank,heap_bases)
+    finished_flags = finished_flags | (1 << local_rank)
+
+    while not all_finished:
+        for target_rank in tl.range(0,world_size,num_stages=2):
+            # check if this rank's data is loaded, if not, proceed
+            rank_finished = ((finished_flags >> target_rank) & 1) == 1
+            if not rank_finished:
+                lock_released = (iris.atomic_cas(
+                    pointer = lock_base + lock_offset, cmp = 1, val = 1, 
+                    from_rank = local_rank, to_rank = target_rank, 
+                    heap_bases=heap_bases) == 1)
+                if lock_released:
+                    load_data_from_target_rank(
+                        iris_input_buffer,hs,in_hn,seq_this_rank,
+                        local_rank,world_size,local_output_bufer,
+                        target_rank,heap_bases)
+                    finished_flags = finished_flags | (1 << target_rank)
+        all_finished = ((finished_flags & mask) == mask)
+
+
+
+@triton.jit
 def all_to_all_4D_bf16_backward_no_barrier(iris_input_buffer,
                     hs:tl.constexpr,
                     in_hn:tl.constexpr, # 5
@@ -265,14 +319,18 @@ def all_to_all_4D_bf16_backward_no_barrier(iris_input_buffer,
     finished_flags = finished_flags | (1 << local_rank)
 
     while not all_finished:
-        for target_rank in tl.range(0,world_size):
+        for target_rank in tl.range(0,world_size,num_stages=2):
             # check if this rank's data is loaded, if not, proceed
             rank_finished = ((finished_flags >> target_rank) & 1) == 1
             if not rank_finished:
-                lock_released = (iris.atomic_cas(
-                    pointer = lock_base + lock_offset, cmp = 1, val = 1, 
-                    from_rank = local_rank, to_rank = target_rank, 
-                    heap_bases=heap_bases) == 1)
+                lock_released = (
+                    iris.load(
+                        pointer = lock_base + lock_offset,
+                        to_rank = local_rank,
+                        from_rank = target_rank,
+                        heap_bases = heap_bases,
+                        mask = None
+                    ) == 1)
                 if lock_released:
                     load_data_from_target_rank(
                         iris_input_buffer,hs,in_hn,seq_this_rank,
