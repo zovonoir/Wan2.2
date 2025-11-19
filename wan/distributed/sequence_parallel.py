@@ -178,8 +178,8 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
         return x
     else:
 
-        assert isinstance(freqs_i,tuple)
-        freqs_i,shmem_handle,iris_buffer_list = freqs_i
+        assert isinstance(freqs,tuple)
+        freqs_i,shmem_handle,iris_buffer_list = freqs
         iris_q,iris_k,iris_v,iris_o,attn_buffer,lock = iris_buffer_list
 
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
