@@ -299,13 +299,14 @@ def all_to_all_4D_bf16_backward_no_barrier(iris_input_buffer,
                     heap_bases:tl.tensor):
 
     pid = tl.program_id(0)
-    if pid == 0:
-        tl.store(lock_base + lock_offset,1,mask=None)
-    # iris.atomic_cas(pointer = lock_base + lock_offset, 
-    #                 cmp = 0, val = 1, 
-    #                 from_rank = local_rank, 
-    #                 to_rank = local_rank, 
-    #                 heap_bases=heap_bases)
+    # if pid == 0:
+    #     tl.store(lock_base + lock_offset,1,mask=None)
+    iris.atomic_cas(pointer = lock_base + lock_offset, 
+                    cmp = 0, val = 1, 
+                    from_rank = local_rank, 
+                    to_rank = local_rank, 
+                    heap_bases=heap_bases,
+                    sem = "release")
 
     finished_flags = 0
     mask = (1 << world_size) - 1 # 1111 1111 
@@ -323,14 +324,10 @@ def all_to_all_4D_bf16_backward_no_barrier(iris_input_buffer,
             # check if this rank's data is loaded, if not, proceed
             rank_finished = ((finished_flags >> target_rank) & 1) == 1
             if not rank_finished:
-                lock_released = (
-                    iris.load(
-                        pointer = lock_base + lock_offset,
-                        to_rank = local_rank,
-                        from_rank = target_rank,
-                        heap_bases = heap_bases,
-                        mask = None
-                    ) == 1)
+                lock_released = (iris.atomic_cas(
+                    pointer = lock_base + lock_offset, cmp = 1, val = 1, 
+                    from_rank = local_rank, to_rank = target_rank, 
+                    heap_bases=heap_bases,sem="acquire") == 1)
                 if lock_released:
                     load_data_from_target_rank(
                         iris_input_buffer,hs,in_hn,seq_this_rank,
