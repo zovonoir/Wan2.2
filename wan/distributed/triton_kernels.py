@@ -207,7 +207,7 @@ def all_to_all_4D_bf16_backward(iris_input_buffer,
             )
 
 @triton.jit
-def load_data_from_target_rank(iris_input_buffer,
+def __alltoall_load_single_token_data_from_target_rank(iris_input_buffer,
                     hs:tl.constexpr,
                     in_hn:tl.constexpr, # 5
                     seq_this_rank:tl.constexpr, # 109120
@@ -235,7 +235,7 @@ def load_data_from_target_rank(iris_input_buffer,
             value = head_data,
             mask = None
         )
-
+    
 
 @triton.jit
 def all_to_all_4D_bf16_backward_no_barrier_backup(iris_input_buffer,
@@ -262,7 +262,7 @@ def all_to_all_4D_bf16_backward_no_barrier_backup(iris_input_buffer,
     all_finished = ((finished_flags & mask) == mask)
 
     # load local data first
-    load_data_from_target_rank(
+    __alltoall_load_single_token_data_from_target_rank(
         iris_input_buffer,hs,in_hn,seq_this_rank,
         local_rank,world_size,local_output_bufer,
         local_rank,heap_bases)
@@ -278,7 +278,7 @@ def all_to_all_4D_bf16_backward_no_barrier_backup(iris_input_buffer,
                     from_rank = local_rank, to_rank = target_rank, 
                     heap_bases=heap_bases) == 1)
                 if lock_released:
-                    load_data_from_target_rank(
+                    __alltoall_load_single_token_data_from_target_rank(
                         iris_input_buffer,hs,in_hn,seq_this_rank,
                         local_rank,world_size,local_output_bufer,
                         target_rank,heap_bases)
@@ -299,8 +299,6 @@ def all_to_all_4D_bf16_backward_no_barrier(iris_input_buffer,
                     heap_bases:tl.tensor):
 
     pid = tl.program_id(0)
-    # if pid == 0:
-    #     tl.store(lock_base + lock_offset,1,mask=None)
     iris.atomic_cas(pointer = lock_base + lock_offset, 
                     cmp = 0, val = 1, 
                     from_rank = local_rank, 
@@ -313,7 +311,7 @@ def all_to_all_4D_bf16_backward_no_barrier(iris_input_buffer,
     all_finished = ((finished_flags & mask) == mask)
 
     # load local data first
-    load_data_from_target_rank(
+    __alltoall_load_single_token_data_from_target_rank(
         iris_input_buffer,hs,in_hn,seq_this_rank,
         local_rank,world_size,local_output_bufer,
         local_rank,heap_bases)
@@ -329,7 +327,7 @@ def all_to_all_4D_bf16_backward_no_barrier(iris_input_buffer,
                     from_rank = local_rank, to_rank = target_rank, 
                     heap_bases=heap_bases,sem="acquire") == 1)
                 if lock_released:
-                    load_data_from_target_rank(
+                    __alltoall_load_single_token_data_from_target_rank(
                         iris_input_buffer,hs,in_hn,seq_this_rank,
                         local_rank,world_size,local_output_bufer,
                         target_rank,heap_bases)

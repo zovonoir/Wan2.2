@@ -275,7 +275,7 @@ with torch.profiler.profile(
     with_stack=True,
     with_flops=False
 ) as prof:
-    for _ in range(50):
+    for _ in range(200):
         rope_alltoall_4D_bf16_forward[(sp_seq_len, 1, 1)](q, freqs_i, hs, rank, sp_seq_len, hn, iris_q, world_size, heap_bases)
         rope_alltoall_4D_bf16_forward[(sp_seq_len, 1, 1)](k, freqs_i, hs, rank, sp_seq_len, hn, iris_k, world_size, heap_bases)
         all_to_all_4D_bf16_forward[(sp_seq_len, 1, 1)](v, hs, hn, sp_seq_len, rank, world_size, iris_v, heap_bases)
@@ -292,7 +292,7 @@ with torch.profiler.profile(
                 window_size=window_size,
             )
         )
-
+        iris_handle.barrier()
         all_to_all_4D_bf16_backward_no_barrier[(13640,1,1)](
                                         iris_input_buffer = iris_o,
                                         hs = hs,
