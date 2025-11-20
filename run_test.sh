@@ -19,5 +19,5 @@ docker run  -d \
 
 docker restart wan2.2_testing_container
 docker exec wan2.2_testing_container git -C /app/Wan2.2 pull
-docker exec wan2.2_testing_container git -C /app/Wan2.2 checkout i2v_release/triton_kernel_optimized1
+docker exec wan2.2_testing_container git -C /app/Wan2.2 checkout i2v_release/triton_kernel_optimized2_remove_alltoall_barrier
 docker exec -e ENABLE_TIMING=1 wan2.2_testing_container bash /app/Wan2.2/tests/i2v.sh

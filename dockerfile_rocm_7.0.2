@@ -38,17 +38,13 @@ RUN pip3 install --no-cache-dir "opencv-python>=4.9.0.80" \
 RUN ln -s python3 /usr/bin/python
 RUN git clone https://github.com/ROCm/iris.git && cd iris && git checkout 0dfc460e37517c05ab88f1b348d491ae30abb673 && pip install -e .
 
-# COPY ./flash_attn-2.8.3-cp310-cp310-linux_x86_64.whl /app/flash_attn-2.8.3-cp310-cp310-linux_x86_64.whl
-# RUN pip3 install /app/flash_attn-2.8.3-cp310-cp310-linux_x86_64.whl
+COPY ./flash_attn-2.8.3-cp310-cp310-linux_x86_64.whl /app/flash_attn-2.8.3-cp310-cp310-linux_x86_64.whl
+RUN pip3 install /app/flash_attn-2.8.3-cp310-cp310-linux_x86_64.whl
 
-# RUN git clone https://github.com/zovonoir/Wan2.2.git && cd Wan2.2 && git checkout i2v_release/triton_kernel_optimized1 && git pull
-
-COPY ./Wan2.2_private /app/Wan2.2
-RUN mkdir -p /app/Wan2.2/generate_video
-RUN pip3 install /app/Wan2.2/flash_attn-2.8.3-cp310-cp310-linux_x86_64.whl
 RUN pip3 install --no-cache-dir peft=="0.17.1"
 
-# no necessary but useful after profile performance
+RUN git clone https://github.com/zovonoir/Wan2.2.git && cd Wan2.2 && git checkout i2v_release/triton_kernel_optimized1 && git pull
+RUN mkdir -p /app/Wan2.2/generate_video
 RUN apt update && apt install -y p7zip-full
 
 RUN git clone https://github.com/ROCm/aiter.git aiter && cd aiter && git checkout a6652a7790627ec769aa42f56da1d51001e63f98  && git submodule sync && git submodule update --init --recursive && python3 setup.py develop
