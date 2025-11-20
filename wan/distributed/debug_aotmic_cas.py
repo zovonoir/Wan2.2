@@ -293,8 +293,7 @@ with torch.profiler.profile(
             )
         )
         iris_handle.barrier()
-        all_to_all_4D_bf16_backward_no_barrier[(13640,1,1)](
-                                        iris_input_buffer = iris_o,
+        alltoallbackward[(304,1,1)](iris_input_buffer = iris_o,
                                         hs = hs,
                                         in_hn = hn//world_size,
                                         seq_this_rank = sp_seq_len*world_size,

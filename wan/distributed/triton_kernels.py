@@ -207,7 +207,9 @@ def all_to_all_4D_bf16_backward(iris_input_buffer,
             )
 
 @triton.jit
-def __alltoall_load_single_token_data_from_target_rank(iris_input_buffer,
+def __alltoall_load_single_token_data_from_target_rank(
+                    token_id,
+                    iris_input_buffer,
                     hs:tl.constexpr,
                     in_hn:tl.constexpr, # 5
                     seq_this_rank:tl.constexpr, # 109120
@@ -216,7 +218,7 @@ def __alltoall_load_single_token_data_from_target_rank(iris_input_buffer,
                     local_output_bufer,
                     target_rank:tl.constexpr,
                     heap_bases:tl.tensor):
-    pid = tl.program_id(0)
+    pid = token_id #tl.program_id(0) # 这就是token id
     output_seq_len = seq_this_rank // world_size
     out_hn = in_hn * world_size
     remote_data_start_offset = (local_rank * output_seq_len)*(in_hn * hs) + pid * (in_hn * hs)
@@ -237,8 +239,61 @@ def __alltoall_load_single_token_data_from_target_rank(iris_input_buffer,
         )
     
 
+# @triton.jit
+# def __alltoall_load_single_token_data_from_all_rank(
+#                     token_id,
+#                     iris_input_buffer,
+#                     hs:tl.constexpr,
+#                     in_hn:tl.constexpr, # 5
+#                     seq_this_rank:tl.constexpr, # 109120
+#                     local_rank:tl.constexpr,
+#                     world_size:tl.constexpr,
+#                     local_output_bufer,
+#                     lock_base,lock_offset,
+#                     heap_bases:tl.tensor):
+
+#     # token_id = tl.program_id(0)
+#     # iris.atomic_cas(pointer = lock_base + lock_offset, 
+#     #                 cmp = 0, val = 1, 
+#     #                 from_rank = local_rank, 
+#     #                 to_rank = local_rank, 
+#     #                 heap_bases=heap_bases,
+#     #                 sem = "release")
+
+#     finished_flags = 0
+#     mask = (1 << world_size) - 1 # 1111 1111 
+#     all_finished = ((finished_flags & mask) == mask)
+
+#     # load local data first
+#     __alltoall_load_single_token_data_from_target_rank(
+#         token_id,
+#         iris_input_buffer,hs,in_hn,seq_this_rank,
+#         local_rank,world_size,local_output_bufer,
+#         local_rank,heap_bases)
+#     finished_flags = finished_flags | (1 << local_rank)
+
+#     while not all_finished:
+#         for target_rank in tl.range(0,world_size,num_stages=2):
+#             # check if this rank's data is loaded, if not, proceed
+#             rank_finished = ((finished_flags >> target_rank) & 1) == 1
+#             if not rank_finished:
+#                 lock_released = (iris.atomic_cas(
+#                     pointer = lock_base + lock_offset, cmp = 1, val = 1, 
+#                     from_rank = local_rank, to_rank = target_rank, 
+#                     heap_bases=heap_bases,sem="acquire") == 1)
+#                 if lock_released:
+#                     __alltoall_load_single_token_data_from_target_rank(
+#                         token_id,
+#                         iris_input_buffer,hs,in_hn,seq_this_rank,
+#                         local_rank,world_size,local_output_bufer,
+#                         target_rank,heap_bases)
+#                     finished_flags = finished_flags | (1 << target_rank)
+#         all_finished = ((finished_flags & mask) == mask)
+
+
 @triton.jit
-def all_to_all_4D_bf16_backward_no_barrier_backup(iris_input_buffer,
+def alltoallbackward(
+                    iris_input_buffer,
                     hs:tl.constexpr,
                     in_hn:tl.constexpr, # 5
                     seq_this_rank:tl.constexpr, # 109120
@@ -247,7 +302,6 @@ def all_to_all_4D_bf16_backward_no_barrier_backup(iris_input_buffer,
                     local_output_bufer,
                     lock_base,lock_offset,
                     heap_bases:tl.tensor):
-
     pid = tl.program_id(0)
     if pid == 0:
         tl.store(lock_base + lock_offset,1,mask=None)
@@ -255,81 +309,46 @@ def all_to_all_4D_bf16_backward_no_barrier_backup(iris_input_buffer,
     #                 cmp = 0, val = 1, 
     #                 from_rank = local_rank, 
     #                 to_rank = local_rank, 
-    #                 heap_bases=heap_bases)
+    #                 heap_bases=heap_bases,
+    #                 sem = "release")
 
-    finished_flags = 0
+    output_seq_len = seq_this_rank // world_size
+    start_token_id = tl.program_id(0)
+    token_stride = tl.num_programs(0)
+    # 先load本地数据
+    for token_id in tl.range(start_token_id,output_seq_len,token_stride):
+        __alltoall_load_single_token_data_from_target_rank(
+            token_id,
+            iris_input_buffer,hs,in_hn,seq_this_rank,
+            local_rank,world_size,local_output_bufer,
+            local_rank,heap_bases)
+    
+    # 尝试加载其他卡的数据,哪张卡好了就加载哪张卡
+    finished_flags:tl.constexpr = 0
+    finished_flags = finished_flags | (1 << local_rank) # 将本地数据对应bit设置为1
     mask = (1 << world_size) - 1 # 1111 1111 
     all_finished = ((finished_flags & mask) == mask)
-
-    # load local data first
-    __alltoall_load_single_token_data_from_target_rank(
-        iris_input_buffer,hs,in_hn,seq_this_rank,
-        local_rank,world_size,local_output_bufer,
-        local_rank,heap_bases)
-    finished_flags = finished_flags | (1 << local_rank)
+    
 
     while not all_finished:
-        for target_rank in tl.range(0,world_size,num_stages=2):
-            # check if this rank's data is loaded, if not, proceed
+        for target_rank in tl.range(0,world_size):
+            # 检查这个rank是不是已经结束了
             rank_finished = ((finished_flags >> target_rank) & 1) == 1
             if not rank_finished:
-                lock_released = (iris.atomic_cas(
-                    pointer = lock_base + lock_offset, cmp = 1, val = 1, 
-                    from_rank = local_rank, to_rank = target_rank, 
-                    heap_bases=heap_bases) == 1)
-                if lock_released:
-                    __alltoall_load_single_token_data_from_target_rank(
-                        iris_input_buffer,hs,in_hn,seq_this_rank,
-                        local_rank,world_size,local_output_bufer,
-                        target_rank,heap_bases)
-                    finished_flags = finished_flags | (1 << target_rank)
-        all_finished = ((finished_flags & mask) == mask)
-
-
-
-@triton.jit
-def all_to_all_4D_bf16_backward_no_barrier(iris_input_buffer,
-                    hs:tl.constexpr,
-                    in_hn:tl.constexpr, # 5
-                    seq_this_rank:tl.constexpr, # 109120
-                    local_rank:tl.constexpr,
-                    world_size:tl.constexpr,
-                    local_output_bufer,
-                    lock_base,lock_offset,
-                    heap_bases:tl.tensor):
-
-    pid = tl.program_id(0)
-    iris.atomic_cas(pointer = lock_base + lock_offset, 
-                    cmp = 0, val = 1, 
-                    from_rank = local_rank, 
-                    to_rank = local_rank, 
-                    heap_bases=heap_bases,
-                    sem = "release")
-
-    finished_flags = 0
-    mask = (1 << world_size) - 1 # 1111 1111 
-    all_finished = ((finished_flags & mask) == mask)
-
-    # load local data first
-    __alltoall_load_single_token_data_from_target_rank(
-        iris_input_buffer,hs,in_hn,seq_this_rank,
-        local_rank,world_size,local_output_bufer,
-        local_rank,heap_bases)
-    finished_flags = finished_flags | (1 << local_rank)
-
-    while not all_finished:
-        for target_rank in tl.range(0,world_size,num_stages=2):
-            # check if this rank's data is loaded, if not, proceed
-            rank_finished = ((finished_flags >> target_rank) & 1) == 1
-            if not rank_finished:
+                # 没有结束就继续检查这个rank上的任务有没有开始
                 lock_released = (iris.atomic_cas(
                     pointer = lock_base + lock_offset, cmp = 1, val = 1, 
                     from_rank = local_rank, to_rank = target_rank, 
                     heap_bases=heap_bases,sem="acquire") == 1)
                 if lock_released:
-                    __alltoall_load_single_token_data_from_target_rank(
-                        iris_input_buffer,hs,in_hn,seq_this_rank,
-                        local_rank,world_size,local_output_bufer,
-                        target_rank,heap_bases)
+                    # 已经开始那就可以安全的加载数据
+                    # 从这张卡一次性加载全部数据
+                    for token_id in tl.range(start_token_id,output_seq_len,token_stride):
+                        __alltoall_load_single_token_data_from_target_rank(
+                            token_id,
+                            iris_input_buffer,hs,in_hn,seq_this_rank,
+                            local_rank,world_size,local_output_bufer,
+                            target_rank,heap_bases)
+                    # 把这张卡标记为完成
                     finished_flags = finished_flags | (1 << target_rank)
-        all_finished = ((finished_flags & mask) == mask)
+                    all_finished = ((finished_flags & mask) == mask)
