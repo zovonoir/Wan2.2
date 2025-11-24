@@ -206,151 +206,92 @@ def all_to_all_4D_bf16_backward(iris_input_buffer,
                 mask = None
             )
 
-@triton.jit
+
+
+
+
+
+
+
+from triton.experimental import gluon
+from triton.experimental.gluon import language as gl
+import iris.experimental.iris_gluon as iris_gl
+
+
+@gluon.jit
 def __alltoall_load_single_token_data_from_target_rank(
+    # IrisDeviceCtx: gl.constexpr,
+    # context_tensor,
+    ctx,
                     token_id,
                     iris_input_buffer,
-                    hs:tl.constexpr,
-                    in_hn:tl.constexpr, # 5
-                    seq_this_rank:tl.constexpr, # 109120
-                    local_rank:tl.constexpr,
-                    world_size:tl.constexpr,
+                    hs:gl.constexpr,
+                    in_hn:gl.constexpr, # 5
+                    seq_this_rank:gl.constexpr, # 109120
+                    local_rank:gl.constexpr,
+                    world_size:gl.constexpr,
                     local_output_bufer,
-                    target_rank:tl.constexpr,
-                    heap_bases:tl.tensor):
+                    target_rank:gl.constexpr,
+                    heap_bases:gl.tensor):
+    # ctx = IrisDeviceCtx.initialize(context_tensor)
+    layout:gl.constexpr = gl.BlockedLayout(
+        size_per_thread=[2],
+        threads_per_warp=[64],
+        warps_per_cta=[1],
+        order=[0]
+    )
+
     pid = token_id #tl.program_id(0) # 这就是token id
     output_seq_len = seq_this_rank // world_size
     out_hn = in_hn * world_size
     remote_data_start_offset = (local_rank * output_seq_len)*(in_hn * hs) + pid * (in_hn * hs)
     local_output_start_offset = pid * out_hn * hs
-    for head_idx in tl.range(0,in_hn):
-        remote_ptrs = iris_input_buffer + remote_data_start_offset + head_idx * hs + tl.arange(0,hs)
-        # 下面是一个copy操作,用copy替换
-        head_data = iris.load(
-            pointer = remote_ptrs,
-            to_rank = local_rank,
-            from_rank = target_rank,
-            heap_bases = heap_bases,
+    for head_idx in gl.range(0,in_hn):
+        remote_ptrs = iris_input_buffer + remote_data_start_offset + head_idx * hs + gl.arange(0,hs)
+        # head_data = iris.load(
+        #     pointer = remote_ptrs,
+        #     to_rank = local_rank,
+        #     from_rank = target_rank,
+        #     heap_bases = heap_bases,
+        #     mask = None
+        # )
+        head_data = ctx.load(
+            remote_ptrs,
+            target_rank,
             mask = None
         )
-        tl.store(
+        gl.store(
             pointer=local_output_bufer + local_output_start_offset + target_rank * in_hn * hs + head_idx *hs + tl.arange(0,hs),
             value = head_data,
             mask = None
         )
+        # ctx.store(local_output_bufer + local_output_start_offset + target_rank * in_hn * hs + head_idx *hs + gl.arange(0,hs,layout=layout), head_data, consumer_rank, mask=mask)
 
 
-@triton.jit
-def __alltoall_store_single_token_data_to_target_rank(
-                                    token_id, # 1-109120
-                                    iris_input_buffer,
-                                    hs:tl.constexpr,
-                                    in_hn:tl.constexpr, # 5
-                                    seq_this_rank:tl.constexpr, # 109120
-                                    local_rank:tl.constexpr,
-                                    world_size:tl.constexpr,
-                                    remote_output_buffer, # [1,13640,40,128]
-                                    heap_bases:tl.tensor):
-    target_rank = token_id // ( 13640 )
-    local_data_offset = token_id * 5 * 128
-    remote_data_offset = token_id % (13640)
-    for head_idx in tl.range(0,5):
-        local_ptrs = iris_input_buffer + local_data_offset + head_idx * 128 + tl.arange(0,128)
-        remote_ptrs = remote_output_buffer + remote_data_offset * 40 * 128 + local_rank * 5 * 128 + head_idx * 128 + tl.arange(0,128)
-        value = tl.load(local_ptrs,mask=None)
-        iris.store(
-                pointer = remote_ptrs,
-                value = value,
-                from_rank = local_rank,
-                to_rank = target_rank,
-                heap_bases = heap_bases,
-                mask = None
-            )
-
-
-# @triton.jit
-# def __alltoall_load_single_token_data_from_all_rank(
-#                     token_id,
-#                     iris_input_buffer,
-#                     hs:tl.constexpr,
-#                     in_hn:tl.constexpr, # 5
-#                     seq_this_rank:tl.constexpr, # 109120
-#                     local_rank:tl.constexpr,
-#                     world_size:tl.constexpr,
-#                     local_output_bufer,
-#                     lock_base,lock_offset,
-#                     heap_bases:tl.tensor):
-
-#     # token_id = tl.program_id(0)
-#     # iris.atomic_cas(pointer = lock_base + lock_offset, 
-#     #                 cmp = 0, val = 1, 
-#     #                 from_rank = local_rank, 
-#     #                 to_rank = local_rank, 
-#     #                 heap_bases=heap_bases,
-#     #                 sem = "release")
-
-#     finished_flags = 0
-#     mask = (1 << world_size) - 1 # 1111 1111 
-#     all_finished = ((finished_flags & mask) == mask)
-
-#     # load local data first
-#     __alltoall_load_single_token_data_from_target_rank(
-#         token_id,
-#         iris_input_buffer,hs,in_hn,seq_this_rank,
-#         local_rank,world_size,local_output_bufer,
-#         local_rank,heap_bases)
-#     finished_flags = finished_flags | (1 << local_rank)
-
-#     while not all_finished:
-#         for target_rank in tl.range(0,world_size,num_stages=2):
-#             # check if this rank's data is loaded, if not, proceed
-#             rank_finished = ((finished_flags >> target_rank) & 1) == 1
-#             if not rank_finished:
-#                 lock_released = (iris.atomic_cas(
-#                     pointer = lock_base + lock_offset, cmp = 1, val = 1, 
-#                     from_rank = local_rank, to_rank = target_rank, 
-#                     heap_bases=heap_bases,sem="acquire") == 1)
-#                 if lock_released:
-#                     __alltoall_load_single_token_data_from_target_rank(
-#                         token_id,
-#                         iris_input_buffer,hs,in_hn,seq_this_rank,
-#                         local_rank,world_size,local_output_bufer,
-#                         target_rank,heap_bases)
-#                     finished_flags = finished_flags | (1 << target_rank)
-#         all_finished = ((finished_flags & mask) == mask)
-
-def get_all_configs():
-    all_configs = []
-    for num_stages in [1,2,3,4,5]:
-        for num_warps in [1,2,4,8,16]:
-            all_configs.append(triton.Config({"num_stages":num_stages},num_warps=num_warps))
-    return all_configs
-
-@triton.autotune(
-    configs = get_all_configs(),
-    key=['seq_this_rank']
-)
-@triton.jit
+@gluon.jit
 def alltoallbackward(
+        IrisDeviceCtx: gl.constexpr,
+    context_tensor,
                     iris_input_buffer,
-                    hs:tl.constexpr,
-                    in_hn:tl.constexpr, # 5
-                    seq_this_rank:tl.constexpr, # 109120
-                    local_rank:tl.constexpr,
-                    world_size:tl.constexpr,
+                    hs:gl.constexpr,
+                    in_hn:gl.constexpr, # 5
+                    seq_this_rank:gl.constexpr, # 109120
+                    local_rank:gl.constexpr,
+                    world_size:gl.constexpr,
                     local_output_bufer,
                     lock_base,lock_offset,
-                    heap_bases:tl.tensor,
-                    num_stages:tl.constexpr):
-    pid = tl.program_id(0)
+                    heap_bases:gl.tensor,
+                    num_stages:gl.constexpr):
+    ctx = IrisDeviceCtx.initialize(context_tensor)
+    pid = gl.program_id(0)
     if pid == 0:
-        tl.store(lock_base + lock_offset,1,mask=None)
+        gl.store(lock_base + lock_offset,1,mask=None)
 
     output_seq_len = seq_this_rank // world_size
-    start_token_id = tl.program_id(0)
-    token_stride = tl.num_programs(0)
+    start_token_id = gl.program_id(0)
+    token_stride = gl.num_programs(0)
     # 先load本地数据
-    for token_id in tl.range(start_token_id,output_seq_len,token_stride,num_stages=num_stages):
+    for token_id in gl.range(start_token_id,output_seq_len,token_stride,num_stages=num_stages):
         __alltoall_load_single_token_data_from_target_rank(
             token_id,
             iris_input_buffer,hs,in_hn,seq_this_rank,
@@ -358,26 +299,25 @@ def alltoallbackward(
             local_rank,heap_bases)
     
     # 尝试加载其他卡的数据,哪张卡好了就加载哪张卡
-    finished_flags:tl.constexpr = 0
+    finished_flags:gl.constexpr = 0
     finished_flags = finished_flags | (1 << local_rank) # 将本地数据对应bit设置为1
     mask = (1 << world_size) - 1 # 1111 1111 
     all_finished = ((finished_flags & mask) == mask)
     
 
     while not all_finished:
-        for target_rank in tl.range(0,world_size,num_stages=2):
+        for target_rank in gl.range(0,world_size,num_stages=2):
             # 检查这个rank是不是已经结束了
             rank_finished = ((finished_flags >> target_rank) & 1) == 1
             if not rank_finished:
                 # 没有结束就继续检查这个rank上的任务有没有开始
-                lock_released = (iris.atomic_cas(
-                    pointer = lock_base + lock_offset, cmp = 1, val = 1, 
-                    from_rank = local_rank, to_rank = target_rank, 
-                    heap_bases=heap_bases,sem="acquire") == 1)
+                lock_released = (ctx.atomic_cas(
+                    lock_base + lock_offset, 1, 1, 
+                    target_rank,sem="acquire",scope="sys") == 1)
                 if lock_released:
                     # 已经开始那就可以安全的加载数据
                     # 从这张卡一次性加载全部数据
-                    for token_id in tl.range(start_token_id,output_seq_len,token_stride,num_stages=num_stages):
+                    for token_id in gl.range(start_token_id,output_seq_len,token_stride,num_stages=num_stages):
                         __alltoall_load_single_token_data_from_target_rank(
                             token_id,
                             iris_input_buffer,hs,in_hn,seq_this_rank,
@@ -386,3 +326,4 @@ def alltoallbackward(
                     # 把这张卡标记为完成
                     finished_flags = finished_flags | (1 << target_rank)
                     all_finished = ((finished_flags & mask) == mask)
+
