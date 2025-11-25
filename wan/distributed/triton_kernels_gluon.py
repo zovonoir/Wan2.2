@@ -231,22 +231,21 @@ def __alltoall_load_single_token_data_from_target_rank(
                     local_rank:gl.constexpr,
                     world_size:gl.constexpr,
                     local_output_bufer,
-                    target_rank:gl.constexpr,
-                    heap_bases:gl.tensor):
+                    target_rank:gl.constexpr):
     # ctx = IrisDeviceCtx.initialize(context_tensor)
-    layout:gl.constexpr = gl.BlockedLayout(
-        size_per_thread=[2],
-        threads_per_warp=[64],
-        warps_per_cta=[1],
-        order=[0]
-    )
+    # layout:gl.constexpr = gl.BlockedLayout(
+    #     size_per_thread=[2],
+    #     threads_per_warp=[64],
+    #     warps_per_cta=[1],
+    #     order=[0]
+    # )
 
     pid = token_id #tl.program_id(0) # 这就是token id
     output_seq_len = seq_this_rank // world_size
     out_hn = in_hn * world_size
     remote_data_start_offset = (local_rank * output_seq_len)*(in_hn * hs) + pid * (in_hn * hs)
     local_output_start_offset = pid * out_hn * hs
-    for head_idx in gl.range(0,in_hn):
+    for head_idx in gl.static_range(0,in_hn):
         remote_ptrs = iris_input_buffer + remote_data_start_offset + head_idx * hs + gl.arange(0,hs)
         # head_data = iris.load(
         #     pointer = remote_ptrs,
@@ -261,7 +260,7 @@ def __alltoall_load_single_token_data_from_target_rank(
             mask = None
         )
         gl.store(
-            pointer=local_output_bufer + local_output_start_offset + target_rank * in_hn * hs + head_idx *hs + tl.arange(0,hs),
+            pointer=local_output_bufer + local_output_start_offset + target_rank * in_hn * hs + head_idx *hs + gl.arange(0,hs),
             value = head_data,
             mask = None
         )
@@ -271,7 +270,7 @@ def __alltoall_load_single_token_data_from_target_rank(
 @gluon.jit
 def alltoallbackward(
         IrisDeviceCtx: gl.constexpr,
-    context_tensor,
+        context_tensor,
                     iris_input_buffer,
                     hs:gl.constexpr,
                     in_hn:gl.constexpr, # 5
@@ -279,9 +278,7 @@ def alltoallbackward(
                     local_rank:gl.constexpr,
                     world_size:gl.constexpr,
                     local_output_bufer,
-                    lock_base,lock_offset,
-                    heap_bases:gl.tensor,
-                    num_stages:gl.constexpr):
+                    lock_base,lock_offset):
     ctx = IrisDeviceCtx.initialize(context_tensor)
     pid = gl.program_id(0)
     if pid == 0:
@@ -290,40 +287,96 @@ def alltoallbackward(
     output_seq_len = seq_this_rank // world_size
     start_token_id = gl.program_id(0)
     token_stride = gl.num_programs(0)
-    # 先load本地数据
-    for token_id in gl.range(start_token_id,output_seq_len,token_stride,num_stages=num_stages):
-        __alltoall_load_single_token_data_from_target_rank(
-            token_id,
-            iris_input_buffer,hs,in_hn,seq_this_rank,
-            local_rank,world_size,local_output_bufer,
-            local_rank,heap_bases)
+    # # 先load本地数据
+    for token_id in range(start_token_id,output_seq_len,token_stride):
+        #########################################################################
+        out_hn = in_hn * world_size
+        remote_data_start_offset = (local_rank * output_seq_len)*(in_hn * hs) + token_id * (in_hn * hs)
+        local_output_start_offset = token_id * out_hn * hs
+        layout: gl.constexpr = gl.BlockedLayout(
+            size_per_thread=[2],
+            threads_per_warp=[64],
+            warps_per_cta=[4],
+            order=[0]
+        )
+        for head_idx in gl.static_range(0,in_hn):
+            remote_ptrs = iris_input_buffer + remote_data_start_offset + head_idx * hs + gl.arange(0,hs,layout=layout)
+            head_data = ctx.load(
+                remote_ptrs,
+                local_rank,
+                mask = None
+            )
+            ctx.store(
+                pointer=local_output_bufer + local_output_start_offset + local_rank * in_hn * hs + head_idx * hs + gl.arange(0,hs,layout=layout),
+                value = head_data,
+                to_rank = local_rank,
+                mask = None
+            )
+        #########################################################################
+        # __alltoall_load_single_token_data_from_target_rank(ctx,
+        #     token_id,
+        #     iris_input_buffer,hs,in_hn,seq_this_rank,
+        #     local_rank,world_size,local_output_bufer,
+        #     local_rank)
     
-    # 尝试加载其他卡的数据,哪张卡好了就加载哪张卡
+    # # 尝试加载其他卡的数据,哪张卡好了就加载哪张卡
     finished_flags:gl.constexpr = 0
     finished_flags = finished_flags | (1 << local_rank) # 将本地数据对应bit设置为1
     mask = (1 << world_size) - 1 # 1111 1111 
     all_finished = ((finished_flags & mask) == mask)
-    
-
     while not all_finished:
-        for target_rank in gl.range(0,world_size,num_stages=2):
-            # 检查这个rank是不是已经结束了
+        for target_rank in gl.static_range(0,world_size):
             rank_finished = ((finished_flags >> target_rank) & 1) == 1
             if not rank_finished:
-                # 没有结束就继续检查这个rank上的任务有没有开始
                 lock_released = (ctx.atomic_cas(
                     lock_base + lock_offset, 1, 1, 
                     target_rank,sem="acquire",scope="sys") == 1)
                 if lock_released:
-                    # 已经开始那就可以安全的加载数据
-                    # 从这张卡一次性加载全部数据
-                    for token_id in gl.range(start_token_id,output_seq_len,token_stride,num_stages=num_stages):
-                        __alltoall_load_single_token_data_from_target_rank(
-                            token_id,
-                            iris_input_buffer,hs,in_hn,seq_this_rank,
-                            local_rank,world_size,local_output_bufer,
-                            target_rank,heap_bases)
-                    # 把这张卡标记为完成
+                    for token_id in range(start_token_id,output_seq_len,token_stride):
+                        out_hn = in_hn * world_size
+                        remote_data_start_offset = (local_rank * output_seq_len)*(in_hn * hs) + token_id * (in_hn * hs)
+                        local_output_start_offset = token_id * out_hn * hs
+                        layout: gl.constexpr = gl.BlockedLayout(
+                            size_per_thread=[2],
+                            threads_per_warp=[64],
+                            warps_per_cta=[4],
+                            order=[0]
+                        )
+                        for head_idx in gl.static_range(0,in_hn):
+                            remote_ptrs = iris_input_buffer + remote_data_start_offset + head_idx * hs + gl.arange(0,hs,layout=layout)
+                            head_data = ctx.load(
+                                remote_ptrs,
+                                target_rank,
+                                mask = None
+                            )
+                            ctx.store(
+                                pointer=local_output_bufer + local_output_start_offset + target_rank * in_hn * hs + head_idx * hs + gl.arange(0,hs,layout=layout),
+                                value = head_data,
+                                to_rank = local_rank,
+                                mask = None
+                            )
                     finished_flags = finished_flags | (1 << target_rank)
                     all_finished = ((finished_flags & mask) == mask)
+
+    # while not all_finished:
+    #     for target_rank in range(0,world_size):
+    #         # 检查这个rank是不是已经结束了
+    #         rank_finished = ((finished_flags >> target_rank) & 1) == 1
+    #         if not rank_finished:
+    #             # 没有结束就继续检查这个rank上的任务有没有开始
+    #             lock_released = (ctx.atomic_cas(
+    #                 lock_base + lock_offset, 1, 1, 
+    #                 target_rank,sem="acquire",scope="sys") == 1)
+    #             if lock_released:
+    #                 # 已经开始那就可以安全的加载数据
+    #                 # 从这张卡一次性加载全部数据
+    #                 for token_id in range(start_token_id,output_seq_len,token_stride):
+    #                     __alltoall_load_single_token_data_from_target_rank(ctx,
+    #                         token_id,
+    #                         iris_input_buffer,hs,in_hn,seq_this_rank,
+    #                         local_rank,world_size,local_output_bufer,
+    #                         target_rank)
+    #                 # 把这张卡标记为完成
+    #                 finished_flags = finished_flags | (1 << target_rank)
+    #                 all_finished = ((finished_flags & mask) == mask)
 

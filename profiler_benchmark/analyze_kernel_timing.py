@@ -98,6 +98,7 @@ def analyze_kernel_timing():
     file_stats = {}
     total_duration = 0.0
     total_count = 0
+    all_durations = []  # 收集所有文件的所有耗时
     
     print("\n" + "=" * 60)
     print("统计结果:")
@@ -108,24 +109,33 @@ def analyze_kernel_timing():
             count = len(durations)
             total = sum(durations)
             average = total / count
+            max_dur = max(durations)
+            min_dur = min(durations)
             
             file_stats[filename] = {
                 'count': count,
                 'total': total,
-                'average': average
+                'average': average,
+                'max': max_dur,
+                'min': min_dur
             }
             
             total_duration += total
             total_count += count
+            all_durations.extend(durations)
             
             print(f"\n文件: {filename}")
             print(f"  - {KERNEL_NAME} 数量: {count}")
             print(f"  - 总耗时: {total:.2f} μs ({total/1000:.2f} ms)")
             print(f"  - 平均耗时: {average:.2f} μs ({average/1000:.4f} ms)")
+            print(f"  - 最长耗时: {max_dur:.2f} μs ({max_dur/1000:.4f} ms)")
+            print(f"  - 最短耗时: {min_dur:.2f} μs ({min_dur/1000:.4f} ms)")
     
     # 计算总体统计
     if total_count > 0:
         global_average = total_duration / total_count
+        global_max = max(all_durations)
+        global_min = min(all_durations)
         
         print("\n" + "=" * 60)
         print("总体统计:")
@@ -134,6 +144,8 @@ def analyze_kernel_timing():
         print(f"总 {KERNEL_NAME} 数量: {total_count}")
         print(f"所有文件总耗时: {total_duration:.2f} μs ({total_duration/1000:.2f} ms)")
         print(f"所有文件平均耗时: {global_average:.2f} μs ({global_average/1000:.4f} ms)")
+        print(f"所有文件最长耗时: {global_max:.2f} μs ({global_max/1000:.4f} ms)")
+        print(f"所有文件最短耗时: {global_min:.2f} μs ({global_min/1000:.4f} ms)")
         
         # 计算每个文件的平均耗时的平均值（如果需要的话）
         file_averages = [stats['average'] for stats in file_stats.values()]

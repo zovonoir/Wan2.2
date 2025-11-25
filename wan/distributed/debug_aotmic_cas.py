@@ -10,7 +10,12 @@ from triton_kernels_gluon import *
 import aiter
 
 
-
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from triton.experimental import gluon
+from triton.experimental.gluon import language as gl
+import iris.experimental.iris_gluon as iris_gl
 
 
 def flash_attention(
@@ -203,15 +208,22 @@ dist.init_process_group(
     rank=rank,
     world_size=world_size)
 
-iris_handle = iris.iris(4*1024*1024*1024)
-iris_q = iris_handle.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
-iris_k = iris_handle.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
-iris_v = iris_handle.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
-iris_o = iris_handle.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
-attn_buffer = iris_handle.zeros([1,13640,40,128],dtype=torch.bfloat16,device="cuda")
-lock = iris_handle.zeros([1024],dtype=torch.int32,device="cuda")
+# iris_handle = iris.iris(4*1024*1024*1024)
+# iris_q = iris_handle.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
+# iris_k = iris_handle.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
+# iris_v = iris_handle.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
+# iris_o = iris_handle.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
+# attn_buffer = iris_handle.zeros([1,13640,40,128],dtype=torch.bfloat16,device="cuda")
+# lock = iris_handle.zeros([1024],dtype=torch.int32,device="cuda")
 
-
+ctx = iris_gl.iris(heap_size=2**30)
+context_tensor = ctx.get_device_context()
+iris_q = ctx.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
+iris_k = ctx.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
+iris_v = ctx.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
+iris_o = ctx.zeros([1,13640*8,40//8,128],dtype=torch.bfloat16,device="cuda")
+attn_buffer = ctx.zeros([1,13640,40,128],dtype=torch.bfloat16,device="cuda")
+lock = ctx.zeros([1024],dtype=torch.int32,device="cuda")
 q = torch.randn([1,13640,40,128],dtype=torch.bfloat16,device="cuda")
 k = torch.randn([1,13640,40,128],dtype=torch.bfloat16,device="cuda")
 v = torch.randn([1,13640,40,128],dtype=torch.bfloat16,device="cuda")
@@ -225,7 +237,7 @@ hs = q.shape[-1]
 
 sp_seq_len = q.shape[1]
 hn = q.shape[2]
-heap_bases = iris_handle.get_heap_bases()
+# heap_bases = iris_handle.get_heap_bases()
 seq_lens = 109120
 window_size = (-1,-1)
 
@@ -234,12 +246,13 @@ window_size = (-1,-1)
 
 
 
-
 # warmup
 for _ in range(50):
+    break
     lock[0] += 1
     lock[lock[0]] = 0
-    iris_handle.barrier()
+    # iris_handle.barrier()
+    ctx.barrier()
     # all_to_all_4D_bf16_backward[(13640,1,1)](iris_o,
     #                         hs,
     #                         hn//world_size, # 5
@@ -248,7 +261,10 @@ for _ in range(50):
     #                         8,
     #                         attn_buffer,
     #                         heap_bases)
-    alltoallbackward[(608,1,1)](iris_input_buffer = iris_o,
+    alltoallbackward[(608,1,1)](
+                    iris_gl.IrisDeviceCtx,
+            context_tensor,
+        iris_input_buffer = iris_o,
                                     hs = hs,
                                     in_hn = hn//world_size,
                                     seq_this_rank = sp_seq_len*world_size,
@@ -256,10 +272,10 @@ for _ in range(50):
                                     world_size = world_size,
                                     local_output_bufer = attn_buffer,
                                     lock_base = lock,
-                                    lock_offset = lock[0].item(),
-                                    heap_bases = heap_bases)
+                                    lock_offset = lock[0].item())
 
-iris_handle.barrier()
+# iris_handle.barrier()
+ctx.barrier()
 
 
 
@@ -276,12 +292,13 @@ with torch.profiler.profile(
     with_flops=False
 ) as prof:
     for _ in range(n):
-        rope_alltoall_4D_bf16_forward[(sp_seq_len, 1, 1)](q, freqs_i, hs, rank, sp_seq_len, hn, iris_q, world_size, heap_bases)
-        rope_alltoall_4D_bf16_forward[(sp_seq_len, 1, 1)](k, freqs_i, hs, rank, sp_seq_len, hn, iris_k, world_size, heap_bases)
-        all_to_all_4D_bf16_forward[(sp_seq_len, 1, 1)](v, hs, hn, sp_seq_len, rank, world_size, iris_v, heap_bases)
+        # rope_alltoall_4D_bf16_forward[(sp_seq_len, 1, 1)](q, freqs_i, hs, rank, sp_seq_len, hn, iris_q, world_size, 1)
+        # rope_alltoall_4D_bf16_forward[(sp_seq_len, 1, 1)](k, freqs_i, hs, rank, sp_seq_len, hn, iris_k, world_size, 1)
+        # all_to_all_4D_bf16_forward[(sp_seq_len, 1, 1)](v, hs, hn, sp_seq_len, rank, world_size, iris_v, 1)
         lock[0] += 1
         lock[lock[0]] = 0
-        iris_handle.barrier()
+        # iris_handle.barrier()
+        ctx.barrier()
 
         iris_o.copy_(
             flash_attention(
@@ -292,9 +309,13 @@ with torch.profiler.profile(
                 window_size=window_size,
             )
         )
-        iris_handle.barrier()
+        # iris_handle.barrier()
+        ctx.barrier()
         
-        alltoallbackward[(608,1,1)](iris_input_buffer = iris_o,
+        alltoallbackward[(304*2,1,1)](
+                        iris_gl.IrisDeviceCtx,
+            context_tensor,
+            iris_input_buffer = iris_o,
                                         hs = hs,
                                         in_hn = hn//world_size,
                                         seq_this_rank = sp_seq_len*world_size,
@@ -302,8 +323,7 @@ with torch.profiler.profile(
                                         world_size = world_size,
                                         local_output_bufer = attn_buffer,
                                         lock_base = lock,
-                                        lock_offset = lock[0].item(),
-                                        heap_bases = heap_bases)
+                                        lock_offset = lock[0].item())
 
         # all_to_all_4D_bf16_backward[(13640,1,1)](iris_o,
         #                     hs,
