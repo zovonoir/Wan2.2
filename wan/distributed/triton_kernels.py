@@ -205,21 +205,21 @@ def all_to_all_4D_bf16_backward_deprecated(iris_input_buffer,
 
 @triton.jit
 def all_to_all_4D_bf16_backward(
-                    local_input_buffer, # load from here,[109160,5,128]
+                    local_input_buffer, # load from here
                     hs:tl.constexpr,
-                    in_hn:tl.constexpr, # 5
-                    seq_this_rank:tl.constexpr, # 109120
+                    in_hn:tl.constexpr,
+                    seq_this_rank:tl.constexpr,
                     local_rank:tl.constexpr,
                     world_size:tl.constexpr,
-                    iris_output_buffer, # iris.store to here [13640,40,128]
+                    iris_output_buffer, # iris.store to here
                     heap_bases:tl.tensor):
     pid = tl.program_id(0)
     token_id = pid
     output_seq_len = seq_this_rank // world_size
     out_hn = in_hn * world_size
     for target_rank in tl.range(0,world_size,num_stages=4):
-        local_data_start_offset = (target_rank * output_seq_len + token_id) * (in_hn * hs) # [5,128]
-        remote_data_start_offset = (token_id) * out_hn * hs + (local_rank * in_hn) * hs # [5,128]
+        local_data_start_offset = (target_rank * output_seq_len + token_id) * (in_hn * hs) # [in_hn,hs]
+        remote_data_start_offset = (token_id) * out_hn * hs + (local_rank * in_hn) * hs # [in_hn,hs]
         for head_idx in tl.static_range(0,in_hn):
             head_data = tl.load(local_input_buffer + local_data_start_offset + head_idx * hs + tl.arange(0,hs),mask=None)
             iris.store(
@@ -230,33 +230,3 @@ def all_to_all_4D_bf16_backward(
                 heap_bases = heap_bases,
                 mask = None
             )
-
-            
-            # value = iris.load(
-            #     pointer = iris_output_buffer + remote_data_start_offset +  head_idx *hs + tl.arange(0,hs),
-            #     # value = head_data,
-            #     from_rank = target_rank,
-            #     to_rank = local_rank,
-            #     heap_bases = heap_bases,
-            #     mask = None
-            # )
-            # tl.store(local_input_buffer + local_data_start_offset + head_idx * hs + tl.arange(0,hs),value,mask=None)
-
-
-    # for target_rank in tl.range(0,world_size,num_stages=4):
-    #     remote_data_start_offset = (local_rank * output_seq_len)*(in_hn * hs) + pid * (in_hn * hs)
-    #     local_output_start_offset = pid * out_hn * hs
-    #     for head_idx in tl.range(0,in_hn):
-    #         remote_ptrs = iris_input_buffer + remote_data_start_offset + head_idx * hs + tl.arange(0,hs)
-    #         head_data = iris.load(
-    #             pointer = remote_ptrs,
-    #             to_rank = local_rank,
-    #             from_rank = target_rank,
-    #             heap_bases = heap_bases,
-    #             mask = None
-    #         )
-    #         tl.store(
-    #             pointer=local_output_bufer + local_output_start_offset + target_rank * in_hn * hs + head_idx *hs + tl.arange(0,hs),
-    #             value = head_data,
-    #             mask = None
-    #         )
