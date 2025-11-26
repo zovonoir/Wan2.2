@@ -209,19 +209,15 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
         rope_alltoall_4D_bf16_forward[(sp_seq_len, 1, 1)](k, freqs_i, hs, rank, sp_seq_len, hn, iris_k, world_size, heap_bases)
         all_to_all_4D_bf16_forward[(sp_seq_len, 1, 1)](v, hs, hn, sp_seq_len, rank, world_size, iris_v, heap_bases)
         shmem_handle.barrier()
-
-        iris_o.copy_(
-            flash_attention(
+        _o = flash_attention(
                 iris_q,
                 iris_k,
                 iris_v,
-                k_lens=seq_lens,
-                window_size=self.window_size,
+                k_lens=torch.tensor([seq_lens]),
+                window_size=(-1,-1),
             )
-        )
-
+        all_to_all_4D_bf16_backward[(sp_seq_len,1,1)](_o, hs, hn//world_size, sp_seq_len*world_size, rank, world_size, attn_buffer, heap_bases)
         shmem_handle.barrier()
-        all_to_all_4D_bf16_backward[(sp_seq_len,1,1)](iris_o, hs, hn//world_size, sp_seq_len*world_size, rank, world_size, attn_buffer, heap_bases)
 
         # output
         x = attn_buffer.flatten(2)
