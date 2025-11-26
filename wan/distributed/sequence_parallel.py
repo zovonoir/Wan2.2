@@ -6,7 +6,7 @@ from ..modules.model import sinusoidal_embedding_1d
 from .ulysses import distributed_attention
 from .util import gather_forward, get_rank, get_world_size
 from .triton_kernels import *
-from ..modules.attention import flash_attention
+from ..modules.attention import flash_attention,__fa
 from .util import all_to_all
 
 def pad_freqs(original_tensor, target_len):
@@ -180,7 +180,7 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
 
         assert isinstance(freqs,tuple)
         freqs_i,shmem_handle,iris_buffer_list = freqs
-        iris_q,iris_k,iris_v,iris_o,attn_buffer = iris_buffer_list
+        iris_q,iris_k,iris_v,iris_o,attn_buffer,cu_seqlen_q,cu_seqlen_k,q_lens,k_lens = iris_buffer_list
 
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
         half_dtypes = (torch.float16, torch.bfloat16)
@@ -208,14 +208,18 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
         rope_alltoall_4D_bf16_forward[(sp_seq_len, 1, 1)](q, freqs_i, hs, rank, sp_seq_len, hn, iris_q, world_size, heap_bases)
         rope_alltoall_4D_bf16_forward[(sp_seq_len, 1, 1)](k, freqs_i, hs, rank, sp_seq_len, hn, iris_k, world_size, heap_bases)
         all_to_all_4D_bf16_forward[(sp_seq_len, 1, 1)](v, hs, hn, sp_seq_len, rank, world_size, iris_v, heap_bases)
+        # prepare_fa_input()
         shmem_handle.barrier()
-        _o = flash_attention(
-                iris_q,
-                iris_k,
-                iris_v,
-                k_lens=torch.tensor([seq_lens]),
-                window_size=(-1,-1),
-            )
+        # _o = flash_attention(
+        #         iris_q,
+        #         iris_k,
+        #         iris_v,
+        #         k_lens=torch.tensor([seq_lens]),
+        #         window_size=(-1,-1),
+        #     )
+        # print(f"{q.shape = },{k.shape = },{v.shape = },{cu_seqlen_q = },{cu_seqlen_k = },{sp_seq_len*world_size = },{k_lens = },{q_lens = }")
+        # assert 0
+        _o = __fa(iris_q,iris_k,iris_v,cu_seqlens_q=cu_seqlen_q,cu_seqlens_k=cu_seqlen_k,max_seqlen_q=sp_seq_len*world_size,max_seqlen_k=sp_seq_len*world_size,dropout_p=0.,softmax_scale=None,causal=False,window_size=(-1,-1))
         all_to_all_4D_bf16_backward[(sp_seq_len,1,1)](_o, hs, hn//world_size, sp_seq_len*world_size, rank, world_size, attn_buffer, heap_bases)
         shmem_handle.barrier()
 

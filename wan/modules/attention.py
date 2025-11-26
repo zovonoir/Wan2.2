@@ -112,6 +112,10 @@ def flash_attention(
     else:
         assert FLASH_ATTN_2_AVAILABLE
         # x = flash_attn.flash_attn_varlen_func(
+        # cu_seqlens_q = torch.cat([q_lens.new_zeros([1]), q_lens]).cumsum(0, dtype=torch.int32).to(q.device, non_blocking=True)
+        # cu_seqlens_k = torch.cat([k_lens.new_zeros([1]), k_lens]).cumsum(0, dtype=torch.int32).to(q.device, non_blocking=True)
+        # print(f"{q.shape = },{k.shape = },{v.shape = },{cu_seqlens_q = },{cu_seqlens_k = },{lq = },{lk = },{k_lens = },{q_lens = }")
+        # assert 0
         x = aiter.ops.mha.flash_attn_varlen_func(
             q=q,
             k=k,
@@ -131,6 +135,21 @@ def flash_attention(
     # output
     return x.type(out_dtype)
 
+def __fa(q,k,v,cu_seqlens_q,cu_seqlens_k,max_seqlen_q,max_seqlen_k,dropout_p=0.,softmax_scale=None,causal=False,window_size=(-1,-1),deterministic=False):
+    x = aiter.ops.mha.flash_attn_varlen_func(
+            q=q.squeeze(0),
+            k=k.squeeze(0),
+            v=v.squeeze(0),
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            dropout_p=dropout_p,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            window_size=window_size,
+            deterministic=deterministic).unflatten(0, (1, q.size(1)))
+    return x
 
 def attention(
     q,
