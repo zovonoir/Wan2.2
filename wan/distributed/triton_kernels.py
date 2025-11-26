@@ -223,22 +223,48 @@ def __alltoall_load_single_token_data_from_target_rank(
     out_hn = in_hn * world_size
     remote_data_start_offset = (local_rank * output_seq_len)*(in_hn * hs) + pid * (in_hn * hs)
     local_output_start_offset = pid * out_hn * hs
-    for head_idx in tl.range(0,in_hn):
+    for head_idx in tl.static_range(0,in_hn):
         remote_ptrs = iris_input_buffer + remote_data_start_offset + head_idx * hs + tl.arange(0,hs)
-        # 下面是一个copy操作,用copy替换
-        head_data = iris.load(
-            pointer = remote_ptrs,
-            to_rank = local_rank,
-            from_rank = target_rank,
-            heap_bases = heap_bases,
-            mask = None
-        )
-        tl.store(
-            pointer=local_output_bufer + local_output_start_offset + target_rank * in_hn * hs + head_idx *hs + tl.arange(0,hs),
-            value = head_data,
-            mask = None
-        )
-
+        # # 测试一下从本地load写到远程，非常快
+        head_data = tl.load(local_output_bufer + local_output_start_offset + target_rank * in_hn * hs + head_idx *hs + tl.arange(0,hs),
+                    mask=None)
+        iris.store(
+                pointer = remote_ptrs,
+                value = head_data,
+                from_rank = local_rank,
+                to_rank = target_rank,
+                heap_bases = heap_bases,
+                mask = None
+            )
+        ####################################################################################################################################
+        # head_data = iris.load(
+        #     pointer = remote_ptrs,
+        #     to_rank = local_rank,
+        #     from_rank = target_rank,
+        #     heap_bases = heap_bases,
+        #     mask = None
+        # )
+        # tl.store(
+        #     pointer=local_output_bufer + local_output_start_offset + target_rank * in_hn * hs + head_idx *hs + tl.arange(0,hs),
+        #     value = head_data,
+        #     mask = None
+        # )
+        ####################################################################################################################################
+    # remote_ptrs1 = iris_input_buffer + remote_data_start_offset + 0 * 128 + tl.arange(0,128)
+    # remote_ptrs2 = iris_input_buffer + remote_data_start_offset + 1 * 128 + tl.arange(0,128)
+    # remote_ptrs3 = iris_input_buffer + remote_data_start_offset + 2 * 128 + tl.arange(0,128)
+    # remote_ptrs4 = iris_input_buffer + remote_data_start_offset + 3 * 128 + tl.arange(0,128)
+    # remote_ptrs5 = iris_input_buffer + remote_data_start_offset + 4 * 128 + tl.arange(0,128)
+    # head_data1 = iris.load(pointer = remote_ptrs1,to_rank = local_rank,from_rank = target_rank,heap_bases = heap_bases,mask = None)
+    # head_data2 = iris.load(pointer = remote_ptrs2,to_rank = local_rank,from_rank = target_rank,heap_bases = heap_bases,mask = None)
+    # head_data3 = iris.load(pointer = remote_ptrs3,to_rank = local_rank,from_rank = target_rank,heap_bases = heap_bases,mask = None)
+    # head_data4 = iris.load(pointer = remote_ptrs4,to_rank = local_rank,from_rank = target_rank,heap_bases = heap_bases,mask = None)
+    # head_data5 = iris.load(pointer = remote_ptrs5,to_rank = local_rank,from_rank = target_rank,heap_bases = heap_bases,mask = None)
+    # tl.store(pointer=local_output_bufer + local_output_start_offset + target_rank * 5 * 128 + 0 * 128 + tl.arange(0,128),value = head_data1,mask = None)
+    # tl.store(pointer=local_output_bufer + local_output_start_offset + target_rank * 5 * 128 + 1 * 128 + tl.arange(0,128),value = head_data2,mask = None)
+    # tl.store(pointer=local_output_bufer + local_output_start_offset + target_rank * 5 * 128 + 2 * 128 + tl.arange(0,128),value = head_data3,mask = None)
+    # tl.store(pointer=local_output_bufer + local_output_start_offset + target_rank * 5 * 128 + 3 * 128 + tl.arange(0,128),value = head_data4,mask = None)
+    # tl.store(pointer=local_output_bufer + local_output_start_offset + target_rank * 5 * 128 + 4 * 128 + tl.arange(0,128),value = head_data5,mask = None)
 
 @triton.jit
 def __alltoall_store_single_token_data_to_target_rank(
@@ -319,17 +345,31 @@ def __alltoall_store_single_token_data_to_target_rank(
 #                     finished_flags = finished_flags | (1 << target_rank)
 #         all_finished = ((finished_flags & mask) == mask)
 
-def get_all_configs():
-    all_configs = []
-    for num_stages in [1,2,3,4,5]:
-        for num_warps in [1,2,4,8,16]:
-            all_configs.append(triton.Config({"num_stages":num_stages},num_warps=num_warps))
-    return all_configs
+@triton.jit
+def notify(lock_base,lock_offset,
+                    heap_bases:tl.tensor,local_rank:tl.constexpr):
+    for rank in tl.static_range(0,8):
+            iris.store(
+            pointer = lock_base + lock_offset*8 + local_rank,
+            value = 1,
+            from_rank = local_rank,
+            to_rank = rank,
+            heap_bases = heap_bases,
+            mask = None
+        )
 
-@triton.autotune(
-    configs = get_all_configs(),
-    key=['seq_this_rank']
-)
+
+# def get_all_configs():
+#     all_configs = []
+#     for num_stages in [1,2,3,4,5]:
+#         for num_warps in [1,2,4,8,16]:
+#             all_configs.append(triton.Config({"num_stages":num_stages},num_warps=num_warps))
+#     return all_configs
+
+# @triton.autotune(
+#     configs = get_all_configs(),
+#     key=['seq_this_rank']
+# )
 @triton.jit
 def alltoallbackward(
                     iris_input_buffer,
@@ -340,17 +380,26 @@ def alltoallbackward(
                     world_size:tl.constexpr,
                     local_output_bufer,
                     lock_base,lock_offset,
-                    heap_bases:tl.tensor,
-                    num_stages:tl.constexpr):
-    pid = tl.program_id(0)
-    if pid == 0:
-        tl.store(lock_base + lock_offset,1,mask=None)
+                    heap_bases:tl.tensor):
+    # pid = tl.program_id(0)
+    # if pid == 0:
+    #     # tl.store(lock_base + lock_offset,1,mask=None)
+    #     for rank in tl.static_range(0,8):
+    #         iris.store(
+    #         pointer = lock_base + lock_offset*8 + local_rank,
+    #         value = 1,
+    #         from_rank = local_rank,
+    #         to_rank = rank,
+    #         heap_bases = heap_bases,
+    #         mask = None
+    #     )
+    
 
     output_seq_len = seq_this_rank // world_size
     start_token_id = tl.program_id(0)
     token_stride = tl.num_programs(0)
     # 先load本地数据
-    for token_id in tl.range(start_token_id,output_seq_len,token_stride,num_stages=num_stages):
+    for token_id in tl.range(start_token_id,output_seq_len,token_stride):
         __alltoall_load_single_token_data_from_target_rank(
             token_id,
             iris_input_buffer,hs,in_hn,seq_this_rank,
@@ -370,14 +419,17 @@ def alltoallbackward(
             rank_finished = ((finished_flags >> target_rank) & 1) == 1
             if not rank_finished:
                 # 没有结束就继续检查这个rank上的任务有没有开始
-                lock_released = (iris.atomic_cas(
-                    pointer = lock_base + lock_offset, cmp = 1, val = 1, 
-                    from_rank = local_rank, to_rank = target_rank, 
-                    heap_bases=heap_bases,sem="acquire") == 1)
+                # lock_released = (iris.atomic_cas(
+                #     pointer = lock_base + lock_offset, cmp = 1, val = 1, 
+                #     from_rank = local_rank, to_rank = target_rank, 
+                #     heap_bases=heap_bases,sem="acquire") == 1)
+                # lock_released = (tl.load(lock_base + lock_offset * 8 + target_rank) == 1)
+                lock_released = tl.atomic_xor(lock_base + lock_offset * 8 + target_rank,0x0001) == 0
+                # value = iris.load(pointer = lock_base + lock_offset,to_rank = local_rank,from_rank = target_rank,heap_bases = heap_bases,mask = None)
                 if lock_released:
                     # 已经开始那就可以安全的加载数据
                     # 从这张卡一次性加载全部数据
-                    for token_id in tl.range(start_token_id,output_seq_len,token_stride,num_stages=num_stages):
+                    for token_id in tl.range(start_token_id,output_seq_len,token_stride):
                         __alltoall_load_single_token_data_from_target_rank(
                             token_id,
                             iris_input_buffer,hs,in_hn,seq_this_rank,
