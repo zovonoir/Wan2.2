@@ -13,7 +13,7 @@ docker run  -d \
         --shm-size=16G \
         --ulimit memlock=-1 \
         --ulimit stack=67108864 \
-        -v /home/jialzhu:/home/jialzhu \
+        -v /data/jialzhu:/home/jialzhu \
         --name wan2.2_testing_container \
         -t wan2.2_rocm7.0.2_pytorch_2.10.0.dev20251023_iris_0dfc460_2
 
