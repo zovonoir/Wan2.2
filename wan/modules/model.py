@@ -7,6 +7,7 @@ from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 
 from .attention import flash_attention
+from aiter.ops.triton.rmsnorm import rms_norm as aiter_rms_norm
 
 __all__ = ['WanModel']
 
@@ -79,7 +80,15 @@ class WanRMSNorm(nn.Module):
         Args:
             x(Tensor): Shape [B, L, C]
         """
-        return self._norm(x.float()).type_as(x) * self.weight
+        original_shape = x.shape
+
+        x_2d = x.reshape(-1, self.dim)
+
+        output = aiter_rms_norm(x_2d, self.weight, self.eps)
+
+        output = output.reshape(original_shape)
+
+        return output
 
     def _norm(self, x):
         return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)

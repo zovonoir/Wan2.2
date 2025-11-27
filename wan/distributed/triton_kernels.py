@@ -114,7 +114,8 @@ def all_to_all_4D_bf16_forward(data, # bf16
         local_rank:tl.constexpr,
         world_size:tl.constexpr,
         iris_buffer,
-        heap_bases:tl.tensor):
+        heap_bases:tl.tensor,
+        lock):
 
     input_head_num = in_hn # 40
     output_head_num = input_head_num // world_size # 5
@@ -138,7 +139,9 @@ def all_to_all_4D_bf16_forward(data, # bf16
                 heap_bases = heap_bases,
                 mask = None
             )
-
+    # 这个token已经发完,通知8张卡
+    # for target_rank in tl.static_range(0,8,1):
+    #     iris.atomic_add(lock, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None)
 
 @triton.jit
 def triton_all_to_all_4D_bf16_backward_deprecated(data, # bf16
